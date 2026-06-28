@@ -471,10 +471,29 @@ class LedgerApp(tk.Tk):
         self.month_var = tk.StringVar(value=date.today().strftime("%Y-%m"))
         self.insight_month_choice = tk.StringVar(value=f"{date.today().month:02d}")
         self.insight_year_choice = tk.StringVar(value=str(date.today().year))
+        self.insight_view_var = tk.StringVar(value="Full monthly obligations + spending")
+        self.insight_category_var = tk.StringVar(value="All categories")
         ttk.Label(controls, text="Month:").pack(side="right", padx=(12, 4))
         ttk.Combobox(controls, textvariable=self.insight_month_choice, values=tuple(f"{n:02d}" for n in range(1, 13)), state="readonly", width=5).pack(side="right")
         ttk.Label(controls, text="Year:").pack(side="right", padx=(12, 4))
         ttk.Combobox(controls, textvariable=self.insight_year_choice, values=tuple(str(date.today().year + offset) for offset in range(-3, 3)), state="readonly", width=7).pack(side="right")
+        ttk.Label(controls, text="Category:").pack(side="right", padx=(12, 4))
+        self.insight_category_choice = ttk.Combobox(controls, textvariable=self.insight_category_var, values=("All categories",), state="readonly", width=20)
+        self.insight_category_choice.pack(side="right")
+        ttk.Label(controls, text="View:").pack(side="right", padx=(12, 4))
+        ttk.Combobox(
+            controls,
+            textvariable=self.insight_view_var,
+            values=(
+                "Full monthly obligations + spending",
+                "Spending transactions only",
+                "Scheduled bills only",
+                "Credit-card spending only",
+                "Cashflow account spending only",
+            ),
+            state="readonly",
+            width=31,
+        ).pack(side="right")
         ttk.Button(controls, text="Apply", command=self.apply_insight_month).pack(side="right", padx=8)
         ttk.Button(controls, text="Restore a backup…", command=self.restore_backup).pack(side="right", padx=8)
         self.insight_total = tk.StringVar()
@@ -484,8 +503,8 @@ class LedgerApp(tk.Tk):
         summary = ttk.Frame(self.data_tab)
         summary.pack(fill="x", pady=(0, 12))
         for i in range(4): summary.columnconfigure(i, weight=1)
-        self.card(summary, "Selected-month spending", self.insight_total, 0)
-        self.card(summary, "Transactions", self.insight_count, 1)
+        self.card(summary, "Selected view total", self.insight_total, 0)
+        self.card(summary, "Items", self.insight_count, 1)
         self.card(summary, "Top category", self.insight_top_category, 2)
         self.card(summary, "Average item", self.insight_avg, 3)
         chart_card = ttk.Frame(self.data_tab, style="Card.TFrame", padding=16)
@@ -1686,8 +1705,75 @@ class LedgerApp(tk.Tk):
     def apply_insight_month(self):
         self.month_var.set(f"{self.insight_year_choice.get()}-{self.insight_month_choice.get()}")
         self.refresh_all()
+
+    def insight_month_range(self, month: str) -> tuple[date, date]:
+        start = datetime.strptime(month, "%Y-%m").date().replace(day=1)
+        end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
+        return start, end
+
+    def insight_records(self, month: str) -> list[dict]:
+        start, end = self.insight_month_range(month)
+        records = []
+        for row in self.db.rows(
+            "SELECT category,description,amount FROM transactions WHERE ledger_id=? AND trans_date BETWEEN ? AND ? AND category<>?",
+            (self.ledger_id, start.isoformat(), end.isoformat(), EXTRA_INCOME_CATEGORY),
+        ):
+            records.append({"category": row["category"], "description": row["description"], "source": "Cashflow account", "amount": float(row["amount"] or 0), "view": "cashflow"})
+        for row in self.db.rows(
+            "SELECT s.category,s.description,s.amount,COALESCE(c.name,'Unknown card') card_name FROM cc_spending s LEFT JOIN cards c ON c.id=s.card_id WHERE s.ledger_id=? AND s.spend_date BETWEEN ? AND ?",
+            (self.ledger_id, start.isoformat(), end.isoformat()),
+        ):
+            records.append({"category": row["category"], "description": row["description"], "source": f"Credit card: {row['card_name']}", "amount": float(row["amount"] or 0), "view": "card"})
+        for bill in self.db.rows("SELECT * FROM bills WHERE ledger_id=? ORDER BY due_day,name", (self.ledger_id,)):
+            for due_date in self.dates_between(bill["due_day"], start, end):
+                records.append({"category": bill["category"], "description": bill["name"], "source": self.bill_event_type(bill), "amount": float(bill["amount"] or 0), "view": "scheduled", "date": due_date.isoformat()})
+        for card in self.db.rows("SELECT * FROM cards WHERE ledger_id=? AND due_day IS NOT NULL ORDER BY due_day,name", (self.ledger_id,)):
+            for due_date in self.dates_between(card["due_day"], start, end):
+                records.append({"category": "Credit Card Minimums", "description": card["name"], "source": "Scheduled card minimum", "amount": float(card["minimum_payment"] or 0), "view": "scheduled", "date": due_date.isoformat()})
+        return records
+
+    def filtered_insight_records(self, records: list[dict]) -> list[dict]:
+        view = self.insight_view_var.get()
+        if view == "Spending transactions only":
+            records = [row for row in records if row["view"] in ("cashflow", "card")]
+        elif view == "Scheduled bills only":
+            records = [row for row in records if row["view"] == "scheduled"]
+        elif view == "Credit-card spending only":
+            records = [row for row in records if row["view"] == "card"]
+        elif view == "Cashflow account spending only":
+            records = [row for row in records if row["view"] == "cashflow"]
+        category = self.insight_category_var.get()
+        if category and category != "All categories":
+            records = [row for row in records if row["category"] == category]
+        return records
+
     def refresh_insights(self):
         month=self.month_var.get().strip()
+        all_records = self.insight_records(month)
+        categories = ("All categories",) + tuple(sorted({row["category"] for row in all_records}))
+        current_category = self.insight_category_var.get()
+        self.insight_category_choice["values"] = categories
+        if current_category not in categories:
+            self.insight_category_var.set("All categories")
+        records = self.filtered_insight_records(all_records)
+        grouped = {}
+        detail_grouped = {}
+        for row in records:
+            grouped.setdefault(row["category"], {"category": row["category"], "total": 0.0, "count": 0})
+            grouped[row["category"]]["total"] += row["amount"]
+            grouped[row["category"]]["count"] += 1
+            key = (row["category"], row["description"], row["source"])
+            detail_grouped.setdefault(key, {"category": row["category"], "description": row["description"], "source": row["source"], "total": 0.0, "count": 0})
+            detail_grouped[key]["total"] += row["amount"]
+            detail_grouped[key]["count"] += 1
+        rows=sorted(grouped.values(), key=lambda row: row["total"], reverse=True)
+        details=sorted(detail_grouped.values(), key=lambda row: (row["category"], -row["total"], row["description"]))
+        total=sum(r["total"] for r in rows); count=sum(r["count"] for r in rows)
+        top_category = rows[0]["category"] if rows else "—"
+        avg = total / count if count else 0
+        self.insight_total.set(money(total)); self.insight_count.set(str(count)); self.insight_top_category.set(top_category); self.insight_avg.set(money(avg)); self.chart_data=rows; self.insight_details=details
+        self.draw_chart()
+        return
         rows=self.db.rows("""
             SELECT category,SUM(amount) total,COUNT(*) count FROM (
                 SELECT category,amount FROM transactions WHERE ledger_id=? AND substr(trans_date,1,7)=? AND category<>?
