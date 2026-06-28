@@ -4,6 +4,7 @@ from __future__ import annotations
 import calendar
 import csv
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -23,8 +24,22 @@ if "--self-test-tk" in sys.argv:
 APP_DIR = Path.home() / "PocketLedger"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = APP_DIR / "budget.db"
-APP_VERSION = "0.1.2"
+APP_VERSION = "0.1.3"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
+RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
+RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
+WHATS_NEW = {
+    "0.1.3": [
+        "Automatic updates now use the hardcoded Pocket Ledger GitHub release feed.",
+        "When a newer release is found, Pocket Ledger can download the Windows ZIP directly instead of sending you to GitHub.",
+        "Added a once-per-version What's New popup so new features and fixes are easier to spot.",
+    ],
+    "0.1.2": [
+        "Added multiple ledgers for personal and business views.",
+        "Added account-based spending so cashflow-account spending and credit-card spending are tracked differently.",
+        "Fixed ledger dropdown order and numeric due-date sorting.",
+    ],
+}
 DEFAULT_LEDGER_NAME = "Personal"
 DEFAULT_CASH_ACCOUNT_NAME = "Main checking"
 CATEGORIES = ("Fixed", "Utilities", "Other")
@@ -209,6 +224,7 @@ class LedgerApp(tk.Tk):
         self.build_settings()
         self.refresh_ledger_choice()
         self.refresh_all()
+        self.after(700, self.show_whats_new_once)
         self.after(1500, self.auto_check_updates)
 
     def _style(self) -> None:
@@ -488,29 +504,35 @@ class LedgerApp(tk.Tk):
         update_card = ttk.Frame(self.settings_tab, style="Card.TFrame", padding=18)
         update_card.pack(fill="x")
         ttk.Label(update_card, text="APP UPDATES", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(update_card, text=f"Current version: {APP_VERSION}", style="Subtitle.TLabel").grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 12))
+        ttk.Label(update_card, text=f"Current version: {APP_VERSION}", style="Subtitle.TLabel").grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 4))
+        ttk.Label(update_card, text=f"Updates come from the official Pocket Ledger releases: {RELEASES_PAGE_URL}", style="Subtitle.TLabel").grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 12))
 
-        self.update_repo_var = tk.StringVar(value=self.db.setting("update_repo", DEFAULT_UPDATE_REPO))
         self.auto_update_var = tk.BooleanVar(value=self.db.setting("auto_update_check", "1") == "1")
         self.update_status_var = tk.StringVar(value="Not checked yet.")
 
-        ttk.Label(update_card, text="GitHub repo:").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=6)
-        ttk.Entry(update_card, textvariable=self.update_repo_var, width=40).grid(row=2, column=1, sticky="w", pady=6)
-        ttk.Checkbutton(update_card, text="Check for updates when Pocket Ledger starts", variable=self.auto_update_var).grid(row=3, column=1, sticky="w", pady=6)
-        ttk.Label(update_card, textvariable=self.update_status_var, style="Subtitle.TLabel").grid(row=4, column=1, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(update_card, text="Check for updates when Pocket Ledger starts", variable=self.auto_update_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=6)
+        ttk.Label(update_card, textvariable=self.update_status_var, style="Subtitle.TLabel").grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
         ttk.Button(update_card, text="Save settings", command=self.save_update_settings).grid(row=5, column=1, sticky="e", pady=(14, 0))
         ttk.Button(update_card, text="Check now", style="Accent.TButton", command=lambda: self.check_for_updates(silent=False)).grid(row=5, column=2, sticky="w", padx=(8, 0), pady=(14, 0))
 
     def save_update_settings(self):
-        repo = self.update_repo_var.get().strip() or DEFAULT_UPDATE_REPO
-        self.update_repo_var.set(repo)
-        self.db.set_setting("update_repo", repo)
         self.db.set_setting("auto_update_check", "1" if self.auto_update_var.get() else "0")
         self.update_status_var.set("Update settings saved.")
 
     def auto_check_updates(self):
         if self.db.setting("auto_update_check", "1") == "1":
             self.check_for_updates(silent=True)
+
+    def show_whats_new_once(self):
+        if self.db.setting("whats_new_seen_version", "") == APP_VERSION:
+            return
+        items = WHATS_NEW.get(APP_VERSION, [])
+        if not items:
+            self.db.set_setting("whats_new_seen_version", APP_VERSION)
+            return
+        message = f"Pocket Ledger {APP_VERSION}\n\n" + "\n".join(f"• {item}" for item in items)
+        messagebox.showinfo("What's New", message)
+        self.db.set_setting("whats_new_seen_version", APP_VERSION)
 
     def version_tuple(self, value: str) -> tuple[int, ...]:
         cleaned = value.strip().lower().lstrip("v")
@@ -520,24 +542,91 @@ class LedgerApp(tk.Tk):
                 parts.append(int(piece))
         return tuple(parts or [0])
 
-    def check_for_updates(self, silent: bool = False):
-        repo = (self.update_repo_var.get().strip() if hasattr(self, "update_repo_var") else self.db.setting("update_repo", DEFAULT_UPDATE_REPO)) or DEFAULT_UPDATE_REPO
-        url = f"https://api.github.com/repos/{repo}/releases/latest"
+    def update_download_dir(self) -> Path:
+        downloads = Path.home() / "Downloads"
+        folder = downloads if downloads.exists() else APP_DIR / "Updates"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def pick_release_asset(self, release: dict) -> dict | None:
+        assets = release.get("assets") or []
+        if not isinstance(assets, list):
+            return None
+        preferred = []
+        for asset in assets:
+            name = str(asset.get("name", "")).lower()
+            url = asset.get("browser_download_url")
+            if not url:
+                continue
+            score = 0
+            if "windows" in name or "win" in name:
+                score += 4
+            if name.endswith(".zip"):
+                score += 3
+            if "pocket-ledger" in name or "pocket ledger" in name:
+                score += 2
+            if name.endswith(".exe"):
+                score += 1
+            preferred.append((score, asset))
+        if not preferred:
+            return None
+        preferred.sort(key=lambda item: item[0], reverse=True)
+        return preferred[0][1]
+
+    def download_update_asset(self, asset: dict, tag: str) -> Path:
+        raw_name = str(asset.get("name") or f"Pocket-Ledger-{tag}-windows.zip")
+        safe_name = re.sub(r"[^A-Za-z0-9._ -]+", "_", raw_name).strip() or f"Pocket-Ledger-{tag}-windows.zip"
+        destination = self.update_download_dir() / safe_name
+        url = asset["browser_download_url"]
+        request = urllib.request.Request(url, headers={"User-Agent": "PocketLedger"})
+        self.update_status_var.set(f"Downloading {tag}...")
+        self.update_idletasks()
+        with urllib.request.urlopen(request, timeout=60) as response:
+            destination.write_bytes(response.read())
+        return destination
+
+    def open_downloaded_update(self, path: Path):
         try:
-            request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "PocketLedger"})
+            os.startfile(path)
+        except OSError:
+            try:
+                os.startfile(path.parent)
+            except OSError:
+                webbrowser.open(RELEASES_PAGE_URL)
+
+    def check_for_updates(self, silent: bool = False):
+        try:
+            request = urllib.request.Request(RELEASES_API_URL, headers={"Accept": "application/vnd.github+json", "User-Agent": "PocketLedger"})
             with urllib.request.urlopen(request, timeout=8) as response:
                 release = json.loads(response.read().decode("utf-8"))
             tag = str(release.get("tag_name", "")).strip()
-            html_url = release.get("html_url", f"https://github.com/{repo}/releases/latest")
             if tag and self.version_tuple(tag) > self.version_tuple(APP_VERSION):
                 self.update_status_var.set(f"Update available: {tag}")
-                if messagebox.askyesno("Update available", f"Pocket Ledger {tag} is available.\n\nOpen the GitHub release page to download it?"):
-                    webbrowser.open(html_url)
+                asset = self.pick_release_asset(release)
+                if not asset:
+                    message = f"Pocket Ledger {tag} is available, but I could not find a downloadable Windows asset."
+                    if not silent:
+                        messagebox.showwarning("Update available", message)
+                    self.update_status_var.set(message)
+                    return
+                if messagebox.askyesno(
+                    "Update available",
+                    f"Pocket Ledger {tag} is available.\n\nDownload {asset.get('name', 'the Windows update')} now?"
+                ):
+                    path = self.download_update_asset(asset, tag)
+                    self.update_status_var.set(f"Downloaded {tag} to {path}")
+                    messagebox.showinfo(
+                        "Update downloaded",
+                        "The update was downloaded.\n\n"
+                        "Close Pocket Ledger, unzip/run the downloaded update, then reopen the app.\n\n"
+                        f"Saved to:\n{path}",
+                    )
+                    self.open_downloaded_update(path)
             else:
                 self.update_status_var.set(f"Pocket Ledger is up to date ({APP_VERSION}).")
                 if not silent:
                     messagebox.showinfo("No update found", f"Pocket Ledger is up to date.\n\nCurrent version: {APP_VERSION}")
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as e:
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError, OSError) as e:
             self.update_status_var.set("Could not check for updates.")
             if not silent:
                 messagebox.showerror("Update check failed", f"Could not check GitHub releases.\n\n{e}")
