@@ -24,11 +24,16 @@ if "--self-test-tk" in sys.argv:
 APP_DIR = Path.home() / "PocketLedger"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = APP_DIR / "budget.db"
-APP_VERSION = "0.1.3"
+APP_VERSION = "0.1.4"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
 WHATS_NEW = {
+    "0.1.4": [
+        "Insights now has view filters for full monthly obligations, spending transactions, scheduled bills, credit-card spending, and cashflow-account spending.",
+        "Added an Insights category filter so you can focus on one category without losing the visual breakdown.",
+        "The default Insights view now ties scheduled bills, card minimums, cashflow spending, and credit-card spending together.",
+    ],
     "0.1.3": [
         "Automatic updates now use the hardcoded Pocket Ledger GitHub release feed.",
         "When a newer release is found, Pocket Ledger can download the Windows ZIP directly instead of sending you to GitHub.",
