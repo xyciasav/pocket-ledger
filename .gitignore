@@ -6,3 +6,4 @@ build_release/
 dist_release/
 *.spec
 .venv/
+.tmp_profile/

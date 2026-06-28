@@ -21,10 +21,12 @@ if "--self-test-tk" in sys.argv:
     raise SystemExit(0)
 
 APP_DIR = Path.home() / "PocketLedger"
-APP_DIR.mkdir(exist_ok=True)
+APP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = APP_DIR / "budget.db"
 APP_VERSION = "0.1.1"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
+DEFAULT_LEDGER_NAME = "Personal"
+DEFAULT_CASH_ACCOUNT_NAME = "Main checking"
 CATEGORIES = ("Fixed", "Utilities", "Other")
 EXTRA_INCOME_CATEGORY = "Extra Income"
 SPENDING_CATEGORIES = ("Groceries", "Dining", "Gas & Transport", "Shopping", "Health", "Entertainment", "Bills", "Credit Card Payment", EXTRA_INCOME_CATEGORY, "Other")
@@ -54,6 +56,12 @@ class Database:
         self.conn = sqlite3.connect(DB_PATH)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ledgers (
+                id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, notes TEXT DEFAULT '');
+            CREATE TABLE IF NOT EXISTS cash_accounts (
+                id INTEGER PRIMARY KEY, ledger_id INTEGER NOT NULL DEFAULT 1,
+                name TEXT NOT NULL, starting_balance REAL NOT NULL DEFAULT 0,
+                start_date TEXT NOT NULL DEFAULT '', notes TEXT DEFAULT '');
             CREATE TABLE IF NOT EXISTS bills (
                 id INTEGER PRIMARY KEY, name TEXT NOT NULL, due_day INTEGER NOT NULL,
                 amount REAL NOT NULL, category TEXT NOT NULL, notes TEXT DEFAULT '');
@@ -82,14 +90,45 @@ class Database:
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '');
         """)
+        self.conn.execute("INSERT OR IGNORE INTO ledgers(id,name,notes) VALUES(1,?,?)", (DEFAULT_LEDGER_NAME, "Default ledger"))
         self.ensure_column("bills", "paid_from", f"TEXT NOT NULL DEFAULT '{BANK_MANUAL}'")
+        for table in ("bills", "income", "cards", "transactions", "cc_spending", "paid_scheduled", "scheduled_overrides"):
+            self.ensure_column(table, "ledger_id", "INTEGER NOT NULL DEFAULT 1")
+        self.ensure_column("transactions", "account_id", "INTEGER")
+        self.ensure_ledger_scoped_overrides()
         self.conn.execute("UPDATE bills SET paid_from=? WHERE paid_from=?", (BANK_MANUAL, BANK_ACCOUNT))
+        self.ensure_default_cash_account()
         self.conn.commit()
 
     def ensure_column(self, table: str, column: str, definition: str) -> None:
         columns = [row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")]
         if column not in columns:
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def ensure_ledger_scoped_overrides(self) -> None:
+        indexes = self.conn.execute("PRAGMA index_list(scheduled_overrides)").fetchall()
+        needs_rebuild = False
+        for row in indexes:
+            if not row["unique"]:
+                continue
+            columns = [info["name"] for info in self.conn.execute(f"PRAGMA index_info({row['name']})")]
+            if columns == ["ledger_id", "event_date", "event_type", "event_name"]:
+                return
+            if columns == ["event_date", "event_type", "event_name"]:
+                needs_rebuild = True
+        if not needs_rebuild:
+            return
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS scheduled_overrides_new (
+                id INTEGER PRIMARY KEY, event_date TEXT NOT NULL, event_type TEXT NOT NULL,
+                event_name TEXT NOT NULL, amount REAL NOT NULL, notes TEXT DEFAULT '',
+                ledger_id INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(ledger_id,event_date,event_type,event_name));
+            INSERT OR IGNORE INTO scheduled_overrides_new(id,event_date,event_type,event_name,amount,notes,ledger_id)
+                SELECT id,event_date,event_type,event_name,amount,notes,ledger_id FROM scheduled_overrides;
+            DROP TABLE scheduled_overrides;
+            ALTER TABLE scheduled_overrides_new RENAME TO scheduled_overrides;
+        """)
 
     def rows(self, query: str, args: tuple = ()) -> list[sqlite3.Row]:
         return self.conn.execute(query, args).fetchall()
@@ -100,6 +139,29 @@ class Database:
     def execute(self, query: str, args: tuple = ()) -> None:
         self.conn.execute(query, args)
         self.conn.commit()
+
+    def ensure_default_cash_account(self) -> None:
+        ledgers = self.conn.execute("SELECT id FROM ledgers").fetchall()
+        for ledger in ledgers:
+            existing = self.conn.execute("SELECT id FROM cash_accounts WHERE ledger_id=? LIMIT 1", (ledger["id"],)).fetchone()
+            if existing:
+                continue
+            start_balance = self.setting("bank_start_balance", "0") if ledger["id"] == 1 else "0"
+            start_date = self.setting("bank_start_date", date.today().isoformat()) if ledger["id"] == 1 else date.today().isoformat()
+            self.conn.execute(
+                "INSERT INTO cash_accounts(ledger_id,name,starting_balance,start_date,notes) VALUES(?,?,?,?,?)",
+                (ledger["id"], DEFAULT_CASH_ACCOUNT_NAME, float(start_balance or 0), start_date, "Default cashflow account"),
+            )
+
+    def active_ledger_id(self) -> int:
+        try:
+            ledger_id = int(self.setting("active_ledger_id", "1"))
+        except ValueError:
+            ledger_id = 1
+        if not self.conn.execute("SELECT id FROM ledgers WHERE id=?", (ledger_id,)).fetchone():
+            ledger_id = 1
+            self.set_setting("active_ledger_id", "1")
+        return ledger_id
 
     def setting(self, key: str, default: str = "") -> str:
         row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
@@ -117,6 +179,8 @@ class LedgerApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.db = Database()
+        self.ledger_id = self.db.active_ledger_id()
+        self.ledger_var = tk.StringVar()
         self.title("Pocket Ledger")
         self.geometry("1500x920")
         self.minsize(1180, 760)
@@ -143,6 +207,7 @@ class LedgerApp(tk.Tk):
         self.build_spending()
         self.build_insights()
         self.build_settings()
+        self.refresh_ledger_choice()
         self.refresh_all()
         self.after(1500, self.auto_check_updates)
 
@@ -171,11 +236,51 @@ class LedgerApp(tk.Tk):
         header.pack(fill="x")
         ttk.Label(header, text="Pocket Ledger", style="Title.TLabel").pack(side="left")
         ttk.Label(header, text="Your money, clearly organized.", style="Subtitle.TLabel").pack(side="left", padx=14, pady=7)
+        ttk.Button(header, text="Add ledger", command=self.ledger_dialog).pack(side="right", padx=(8, 0))
+        self.ledger_choice = ttk.Combobox(header, textvariable=self.ledger_var, state="readonly", width=22)
+        self.ledger_choice.pack(side="right", padx=(8, 0))
+        self.ledger_choice.bind("<<ComboboxSelected>>", lambda _: self.switch_ledger())
+        ttk.Label(header, text="Ledger:").pack(side="right", padx=(12, 0))
         ttk.Button(header, text="Import full data", command=self.import_full_data).pack(side="right", padx=(8, 0))
         ttk.Button(header, text="Export full data", command=self.export_full_data).pack(side="right")
         ttk.Button(header, text="Back up data", command=self.backup_data).pack(side="right", padx=(8, 0))
         ttk.Button(header, text="Export spending CSV", command=self.export_transactions).pack(side="right")
         ttk.Button(header, text="Refresh", command=self.refresh_all).pack(side="right")
+
+    def ledger_rows(self):
+        return self.db.rows("SELECT * FROM ledgers ORDER BY name")
+
+    def refresh_ledger_choice(self) -> None:
+        ledgers = self.ledger_rows()
+        values = tuple(f"{row['id']} - {row['name']}" for row in ledgers)
+        self.ledger_choice["values"] = values
+        current = next((value for value in values if value.startswith(f"{self.ledger_id} - ")), values[0] if values else "")
+        self.ledger_var.set(current)
+
+    def switch_ledger(self) -> None:
+        value = self.ledger_var.get()
+        if not value:
+            return
+        self.ledger_id = int(value.split(" - ", 1)[0])
+        self.db.set_setting("active_ledger_id", str(self.ledger_id))
+        self.db.ensure_default_cash_account()
+        self.refresh_all()
+
+    def ledger_dialog(self):
+        def save(v):
+            name = v["Ledger name"].strip()
+            if not name:
+                raise ValueError("Ledger name is required.")
+            with self.db.conn:
+                cursor = self.db.conn.execute("INSERT INTO ledgers(name,notes) VALUES(?,?)", (name, v["Notes"]))
+                ledger_id = cursor.lastrowid
+                self.db.conn.execute(
+                    "INSERT INTO cash_accounts(ledger_id,name,starting_balance,start_date,notes) VALUES(?,?,?,?,?)",
+                    (ledger_id, DEFAULT_CASH_ACCOUNT_NAME, 0, date.today().isoformat(), "Default cashflow account"),
+                )
+            self.ledger_id = ledger_id
+            self.db.set_setting("active_ledger_id", str(ledger_id))
+        self.form("Add ledger", [("Ledger name","text",()),("Notes","text",())], {"Ledger name":"Business"}, save)
 
     def card(self, parent: ttk.Frame, title: str, variable: tk.StringVar, col: int) -> None:
         frame = ttk.Frame(parent, style="Card.TFrame", padding=16)
@@ -214,7 +319,7 @@ class LedgerApp(tk.Tk):
         self.metric_card(cards, "Cash today", self.projected_var, 0, 0)
         self.metric_card(cards, "Spending since start", self.spent_var, 0, 1)
         self.metric_card(cards, "Card debt", self.card_var, 0, 2)
-        self.metric_card(cards, "Bank start", self.bank_start_var, 1, 0)
+        self.metric_card(cards, "Cashflow start", self.bank_start_var, 1, 0)
         self.metric_card(cards, "Income received", self.income_var, 1, 1)
         self.metric_card(cards, "Due bills + cards", self.outflow_var, 1, 2)
 
@@ -224,7 +329,7 @@ class LedgerApp(tk.Tk):
         account_header = ttk.Frame(account_row, style="Card.TFrame")
         account_header.pack(fill="x")
         ttk.Label(account_header, text="ACCOUNT MATH", style="CardTitle.TLabel").pack(side="left")
-        ttk.Button(account_header, text="Set bank starting balance", command=self.account_dialog).pack(side="right")
+        ttk.Button(account_header, text="Set cashflow account", command=self.account_dialog).pack(side="right")
         ttk.Label(account_row, textvariable=self.account_math_var, style="Subtitle.TLabel", wraplength=900, justify="left").pack(anchor="w", pady=(7, 0))
 
         self.cashflow_var = tk.StringVar()
@@ -313,7 +418,7 @@ class LedgerApp(tk.Tk):
         ttk.Label(top, text="Spending", style="Title.TLabel").pack(side="left")
         ttk.Button(top, text="Import bank PDF", command=self.import_pdf).pack(side="right", padx=(8, 0))
         ttk.Button(top, text="Import bank CSV", style="Accent.TButton", command=self.import_csv).pack(side="right")
-        ttk.Label(self.spending_tab, text="Bank transactions affect Dashboard cashflow. Credit-card spending affects card usage and Insights only.", style="Subtitle.TLabel").pack(anchor="w", pady=(6, 16))
+        ttk.Label(self.spending_tab, text="Cashflow-account spending affects Dashboard cashflow. Credit-card spending affects card usage and Insights only.", style="Subtitle.TLabel").pack(anchor="w", pady=(6, 16))
 
         panes = ttk.Panedwindow(self.spending_tab, orient="horizontal")
         panes.pack(fill="both", expand=True)
@@ -322,26 +427,26 @@ class LedgerApp(tk.Tk):
         panes.add(bank_frame, weight=3)
         panes.add(cc_frame, weight=3)
 
-        self.section_title(bank_frame, "Bank cashflow transactions", "Add cashflow transaction", self.transaction_dialog)
-        ttk.Label(bank_frame, text="Use this for checking-account spending, planned bank outflows, and credit-card payments from the bank.", style="Subtitle.TLabel").pack(anchor="w", pady=(8, 0))
-        self.transaction_tree = self.tree(bank_frame, ("Date", "Description", "Category", "Amount", "Source"), (105, 270, 145, 95, 130))
+        self.section_title(bank_frame, "Cashflow account transactions", "Add cashflow transaction", self.transaction_dialog)
+        ttk.Label(bank_frame, text="Use this for planned cashflow outflows, money in, and credit-card payments from checking.", style="Subtitle.TLabel").pack(anchor="w", pady=(8, 0))
+        self.transaction_tree = self.tree(bank_frame, ("Date", "Account", "Description", "Category", "Amount", "Source"), (105, 130, 230, 145, 95, 120))
         self.transaction_tree.pack(fill="both", expand=True, pady=(10, 8))
         self.transaction_tree.bind("<Double-1>", lambda _: self.edit_transaction())
         bank_buttons = ttk.Frame(bank_frame, style="Card.TFrame")
         bank_buttons.pack(fill="x")
         ttk.Button(bank_buttons, text="Add money in", style="Accent.TButton", command=self.money_in_dialog).pack(side="left")
-        ttk.Button(bank_buttons, text="Edit selected bank transaction", command=self.edit_transaction).pack(side="right", padx=(6, 0))
-        ttk.Button(bank_buttons, text="Delete selected bank transaction", command=self.delete_transaction).pack(side="right")
+        ttk.Button(bank_buttons, text="Edit selected cashflow transaction", command=self.edit_transaction).pack(side="right", padx=(6, 0))
+        ttk.Button(bank_buttons, text="Delete selected cashflow transaction", command=self.delete_transaction).pack(side="right")
 
-        self.section_title(cc_frame, "Credit-card spending", "Add CC spend", self.cc_spending_dialog)
-        ttk.Label(cc_frame, text="Use this for purchases made on a credit card. These do not touch cashflow until you add a Credit Card Payment bank transaction.", style="Subtitle.TLabel").pack(anchor="w", pady=(8, 0))
-        self.cc_spend_tree = self.tree(cc_frame, ("Date", "Card", "Description", "Category", "Amount"), (95, 120, 220, 130, 95))
+        self.section_title(cc_frame, "Spending", "Add spending", self.cc_spending_dialog)
+        ttk.Label(cc_frame, text="Choose the account used. Cashflow-account spending reduces cash today; credit-card spending tracks usage without touching cashflow.", style="Subtitle.TLabel").pack(anchor="w", pady=(8, 0))
+        self.cc_spend_tree = self.tree(cc_frame, ("Date", "Account", "Description", "Category", "Amount", "Cashflow?"), (95, 160, 220, 130, 95, 85))
         self.cc_spend_tree.pack(fill="both", expand=True, pady=(10, 8))
-        self.cc_spend_tree.bind("<Double-1>", lambda _: self.edit_cc_spending())
+        self.cc_spend_tree.bind("<Double-1>", lambda _: self.edit_spending())
         cc_buttons = ttk.Frame(cc_frame, style="Card.TFrame")
         cc_buttons.pack(fill="x")
-        ttk.Button(cc_buttons, text="Edit selected CC spend", command=self.edit_cc_spending).pack(side="right", padx=(6, 0))
-        ttk.Button(cc_buttons, text="Delete selected CC spend", command=self.delete_cc_spending).pack(side="right")
+        ttk.Button(cc_buttons, text="Edit selected spending", command=self.edit_spending).pack(side="right", padx=(6, 0))
+        ttk.Button(cc_buttons, text="Delete selected spending", command=self.delete_spending).pack(side="right")
 
     def build_insights(self) -> None:
         controls = ttk.Frame(self.data_tab)
@@ -474,6 +579,34 @@ class LedgerApp(tk.Tk):
         if not item: messagebox.showinfo("Select a row", "Select an item first."); return None
         return int(item)
 
+    def selected_raw(self, tree):
+        item = tree.focus()
+        if not item:
+            messagebox.showinfo("Select a row", "Select an item first.")
+            return None
+        return item
+
+    def cash_account(self):
+        account = self.db.one("SELECT * FROM cash_accounts WHERE ledger_id=? ORDER BY id LIMIT 1", (self.ledger_id,))
+        if account:
+            return account
+        self.db.execute(
+            "INSERT INTO cash_accounts(ledger_id,name,starting_balance,start_date,notes) VALUES(?,?,?,?,?)",
+            (self.ledger_id, DEFAULT_CASH_ACCOUNT_NAME, 0, date.today().isoformat(), "Default cashflow account"),
+        )
+        return self.db.one("SELECT * FROM cash_accounts WHERE ledger_id=? ORDER BY id LIMIT 1", (self.ledger_id,))
+
+    def spending_account_choices(self):
+        cash = self.cash_account()
+        choices = [f"cash:{cash['id']} - {cash['name']} (cashflow)"]
+        choices.extend(f"card:{row['id']} - {row['name']}" for row in self.db.rows("SELECT id,name FROM cards WHERE ledger_id=? ORDER BY name", (self.ledger_id,)))
+        return tuple(choices)
+
+    def parse_account_choice(self, choice: str) -> tuple[str, int]:
+        prefix, rest = choice.split(":", 1)
+        account_id = int(rest.split(" - ", 1)[0])
+        return prefix, account_id
+
     def center_child(self, win: tk.Toplevel) -> None:
         win.update_idletasks()
         parent_x, parent_y = self.winfo_rootx(), self.winfo_rooty()
@@ -505,78 +638,116 @@ class LedgerApp(tk.Tk):
         initial = {"Paid from": BANK_MANUAL} if row is None else {"Name":row["name"], "Date due":row["due_day"], "Amount":row["amount"], "Category":row["category"], "Paid from":row["paid_from"], "Notes":row["notes"]}
         def save(v):
             args=(v["Name"], self.int_day(v["Date due"]), self.num(v["Amount"]), v["Category"], v["Paid from"] or BANK_MANUAL, v["Notes"])
-            if row: self.db.execute("UPDATE bills SET name=?,due_day=?,amount=?,category=?,paid_from=?,notes=? WHERE id=?", args+(row["id"],))
-            else: self.db.execute("INSERT INTO bills(name,due_day,amount,category,paid_from,notes) VALUES(?,?,?,?,?,?)", args)
+            if row: self.db.execute("UPDATE bills SET name=?,due_day=?,amount=?,category=?,paid_from=?,notes=? WHERE id=? AND ledger_id=?", args+(row["id"], self.ledger_id))
+            else: self.db.execute("INSERT INTO bills(name,due_day,amount,category,paid_from,notes,ledger_id) VALUES(?,?,?,?,?,?,?)", args+(self.ledger_id,))
         self.form("Edit bill" if row else "Add bill", [("Name","text",()),("Date due","day",()),("Amount","text",()),("Category","choice",CATEGORIES),("Paid from","choice",PAYMENT_METHODS),("Notes","text",())], initial, save)
 
     def income_dialog(self, row=None):
         initial = {} if row is None else {"Name":row["name"], "Amount":row["amount"], "Frequency":row["frequency"], "Pay day":row["pay_day"] or "", "Notes":row["notes"]}
         def save(v):
             day = self.int_day(v["Pay day"]) if v["Pay day"] else None; args=(v["Name"],self.num(v["Amount"]),v["Frequency"],day,v["Notes"])
-            if row: self.db.execute("UPDATE income SET name=?,amount=?,frequency=?,pay_day=?,notes=? WHERE id=?",args+(row["id"],))
-            else: self.db.execute("INSERT INTO income(name,amount,frequency,pay_day,notes) VALUES(?,?,?,?,?)",args)
+            if row: self.db.execute("UPDATE income SET name=?,amount=?,frequency=?,pay_day=?,notes=? WHERE id=? AND ledger_id=?",args+(row["id"], self.ledger_id))
+            else: self.db.execute("INSERT INTO income(name,amount,frequency,pay_day,notes,ledger_id) VALUES(?,?,?,?,?,?)",args+(self.ledger_id,))
         self.form("Edit income" if row else "Add income", [("Name","text",()),("Amount","text",()),("Frequency","choice",("Monthly","Biweekly","Weekly","Annual")),("Pay day","day",()),("Notes","text",())], initial, save)
 
     def card_dialog(self, row=None):
         initial = {} if row is None else {"Card name":row["name"],"Balance":row["balance"],"Credit limit":row["credit_limit"],"APR %":row["apr"],"Minimum payment":row["minimum_payment"],"Due day":row["due_day"] or "", "Notes":row["notes"]}
         def save(v):
             day=self.int_day(v["Due day"]) if v["Due day"] else None; args=(v["Card name"],self.num(v["Balance"]),self.num(v["Credit limit"]),self.num(v["APR %"]),self.num(v["Minimum payment"]),day,v["Notes"])
-            if row:self.db.execute("UPDATE cards SET name=?,balance=?,credit_limit=?,apr=?,minimum_payment=?,due_day=?,notes=? WHERE id=?",args+(row["id"],))
-            else:self.db.execute("INSERT INTO cards(name,balance,credit_limit,apr,minimum_payment,due_day,notes) VALUES(?,?,?,?,?,?,?)",args)
+            if row:self.db.execute("UPDATE cards SET name=?,balance=?,credit_limit=?,apr=?,minimum_payment=?,due_day=?,notes=? WHERE id=? AND ledger_id=?",args+(row["id"], self.ledger_id))
+            else:self.db.execute("INSERT INTO cards(name,balance,credit_limit,apr,minimum_payment,due_day,notes,ledger_id) VALUES(?,?,?,?,?,?,?,?)",args+(self.ledger_id,))
         self.form("Edit card" if row else "Add credit card", [("Card name","text",()),("Balance","text",()),("Credit limit","text",()),("APR %","text",()),("Minimum payment","text",()),("Due day","day",()),("Notes","text",())], initial, save)
 
     def transaction_dialog(self, row=None):
+        cash = self.cash_account()
         initial = {"Date":date.today().isoformat(),"Category":"Other"} if row is None else {"Date":row["trans_date"],"Description":row["description"],"Amount":row["amount"],"Category":row["category"]}
         def save(v):
             args=(self.valid_date(v["Date"]),v["Description"],self.num(v["Amount"]),v["Category"])
-            if row: self.db.execute("UPDATE transactions SET trans_date=?,description=?,amount=?,category=? WHERE id=?", args+(row["id"],))
-            else: self.db.execute("INSERT INTO transactions(trans_date,description,amount,category,source) VALUES(?,?,?,?,?)", args+("Manual",))
+            if row: self.db.execute("UPDATE transactions SET trans_date=?,description=?,amount=?,category=? WHERE id=? AND ledger_id=?", args+(row["id"], self.ledger_id))
+            else: self.db.execute("INSERT INTO transactions(trans_date,description,amount,category,source,account_id,ledger_id) VALUES(?,?,?,?,?,?,?)", args+("Manual", cash["id"], self.ledger_id))
         self.form("Edit bank transaction" if row else "Add transaction", [("Date","text",()),("Description","text",()),("Amount","text",()),("Category","choice",SPENDING_CATEGORIES)], initial, save)
 
     def money_in_dialog(self):
+        cash = self.cash_account()
         def save(v):
             self.db.execute(
-                "INSERT INTO transactions(trans_date,description,amount,category,source) VALUES(?,?,?,?,?)",
-                (self.valid_date(v["Date"]), v["Description"], self.num(v["Amount"]), EXTRA_INCOME_CATEGORY, "Manual"),
+                "INSERT INTO transactions(trans_date,description,amount,category,source,account_id,ledger_id) VALUES(?,?,?,?,?,?,?)",
+                (self.valid_date(v["Date"]), v["Description"], self.num(v["Amount"]), EXTRA_INCOME_CATEGORY, "Manual", cash["id"], self.ledger_id),
             )
         self.form("Add money in", [("Date","text",()),("Description","text",()),("Amount","text",())], {"Date":date.today().isoformat(),"Description":"Extra income"}, save)
 
     def cc_spending_dialog(self, row=None):
-        cards = self.db.rows("SELECT id,name FROM cards ORDER BY name")
-        if not cards:
-            messagebox.showinfo("Add a credit card", "Add a credit card in Setup before tracking credit-card spending.")
-            return
-        card_choices = tuple(f"{card['id']} - {card['name']}" for card in cards)
+        choices = self.spending_account_choices()
         if row is None:
-            initial = {"Date": date.today().isoformat(), "Card": card_choices[0], "Category": "Other"}
+            initial = {"Date": date.today().isoformat(), "Account": choices[0], "Category": "Other"}
         else:
-            card_name = self.db.one("SELECT name FROM cards WHERE id=?", (row["card_id"],))
+            row_kind = row["kind"] if "kind" in row.keys() else "card"
+            if row_kind == "cash":
+                account = self.cash_account()
+                account_choice = f"cash:{account['id']} - {account['name']} (cashflow)"
+            else:
+                card_name = self.db.one("SELECT name FROM cards WHERE id=? AND ledger_id=?", (row["card_id"], self.ledger_id))
+                account_choice = f"card:{row['card_id']} - {card_name['name'] if card_name else 'Unknown card'}"
             initial = {
-                "Date": row["spend_date"],
-                "Card": f"{row['card_id']} - {card_name['name'] if card_name else 'Unknown card'}",
+                "Date": row["spend_date"] if "spend_date" in row.keys() else row["trans_date"],
+                "Account": account_choice,
                 "Description": row["description"],
                 "Amount": row["amount"],
                 "Category": row["category"],
-                "Notes": row["notes"],
+                "Notes": row["notes"] if "notes" in row.keys() else "",
             }
         def save(v):
-            card_id = int(v["Card"].split(" - ", 1)[0])
-            args = (self.valid_date(v["Date"]), card_id, v["Description"], self.num(v["Amount"]), v["Category"], v["Notes"])
+            kind, account_id = self.parse_account_choice(v["Account"])
+            amount = self.num(v["Amount"])
             if row:
-                self.db.execute("UPDATE cc_spending SET spend_date=?,card_id=?,description=?,amount=?,category=?,notes=? WHERE id=?", args+(row["id"],))
+                old_kind = row["kind"] if "kind" in row.keys() else "card"
+                if old_kind == kind == "cash":
+                    self.db.execute(
+                        "UPDATE transactions SET trans_date=?,description=?,amount=?,category=?,account_id=? WHERE id=? AND ledger_id=?",
+                        (self.valid_date(v["Date"]), v["Description"], amount, v["Category"], account_id, row["id"], self.ledger_id),
+                    )
+                elif old_kind == kind == "card":
+                    self.db.execute(
+                        "UPDATE cc_spending SET spend_date=?,card_id=?,description=?,amount=?,category=?,notes=? WHERE id=? AND ledger_id=?",
+                        (self.valid_date(v["Date"]), account_id, v["Description"], amount, v["Category"], v["Notes"], row["id"], self.ledger_id),
+                    )
+                else:
+                    self.db.execute("DELETE FROM transactions WHERE id=? AND ledger_id=?" if old_kind == "cash" else "DELETE FROM cc_spending WHERE id=? AND ledger_id=?", (row["id"], self.ledger_id))
+                    if kind == "cash":
+                        self.db.execute(
+                            "INSERT INTO transactions(trans_date,description,amount,category,source,account_id,ledger_id) VALUES(?,?,?,?,?,?,?)",
+                            (self.valid_date(v["Date"]), v["Description"], amount, v["Category"], "Manual", account_id, self.ledger_id),
+                        )
+                    else:
+                        self.db.execute(
+                            "INSERT INTO cc_spending(spend_date,card_id,description,amount,category,notes,ledger_id) VALUES(?,?,?,?,?,?,?)",
+                            (self.valid_date(v["Date"]), account_id, v["Description"], amount, v["Category"], v["Notes"], self.ledger_id),
+                        )
             else:
-                self.db.execute("INSERT INTO cc_spending(spend_date,card_id,description,amount,category,notes) VALUES(?,?,?,?,?,?)", args)
-        self.form("Edit CC spending" if row else "Add CC spending", [("Date","text",()),("Card","choice",card_choices),("Description","text",()),("Amount","text",()),("Category","choice",SPENDING_CATEGORIES),("Notes","text",())], initial, save)
+                if kind == "cash":
+                    self.db.execute(
+                        "INSERT INTO transactions(trans_date,description,amount,category,source,account_id,ledger_id) VALUES(?,?,?,?,?,?,?)",
+                        (self.valid_date(v["Date"]), v["Description"], amount, v["Category"], "Manual", account_id, self.ledger_id),
+                    )
+                else:
+                    self.db.execute(
+                        "INSERT INTO cc_spending(spend_date,card_id,description,amount,category,notes,ledger_id) VALUES(?,?,?,?,?,?,?)",
+                        (self.valid_date(v["Date"]), account_id, v["Description"], amount, v["Category"], v["Notes"], self.ledger_id),
+                    )
+        self.form("Edit spending" if row else "Add spending", [("Date","text",()),("Account","choice",choices),("Description","text",()),("Amount","text",()),("Category","choice",SPENDING_CATEGORIES),("Notes","text",())], initial, save)
 
     def account_dialog(self):
         initial = {
-            "Bank starting balance": self.db.setting("bank_start_balance", "0"),
-            "As-of date": self.db.setting("bank_start_date", date.today().isoformat()),
+            "Cashflow account name": self.cash_account()["name"],
+            "Starting balance": self.cash_account()["starting_balance"],
+            "As-of date": self.cash_account()["start_date"] or date.today().isoformat(),
         }
         def save(v):
-            self.db.set_setting("bank_start_balance", str(self.num(v["Bank starting balance"])))
-            self.db.set_setting("bank_start_date", self.valid_date(v["As-of date"]))
-        self.form("Set bank starting balance", [("Bank starting balance","text",()),("As-of date","text",())], initial, save)
+            self.db.execute(
+                "UPDATE cash_accounts SET name=?,starting_balance=?,start_date=? WHERE id=? AND ledger_id=?",
+                (v["Cashflow account name"], self.num(v["Starting balance"]), self.valid_date(v["As-of date"]), self.cash_account()["id"], self.ledger_id),
+            )
+        self.form("Set cashflow account", [("Cashflow account name","text",()),("Starting balance","text",()),("As-of date","text",())], initial, save)
 
     def mark_upcoming_paid(self):
         item = self.upcoming_tree.focus()
@@ -596,8 +767,8 @@ class LedgerApp(tk.Tk):
         if not messagebox.askyesno("Mark paid", f"Mark this scheduled item paid?\n\n{event_date} - {event_type} - {event_name}"):
             return
         self.db.execute(
-            "INSERT INTO paid_scheduled(event_date,event_type,event_name,amount,paid_date,notes) VALUES(?,?,?,?,?,?)",
-            (event_date, event_type, event_name, abs(self.num(amount_text)), date.today().isoformat(), "Marked paid from dashboard"),
+            "INSERT INTO paid_scheduled(event_date,event_type,event_name,amount,paid_date,notes,ledger_id) VALUES(?,?,?,?,?,?,?)",
+            (event_date, event_type, event_name, abs(self.num(amount_text)), date.today().isoformat(), "Marked paid from dashboard", self.ledger_id),
         )
         self.refresh_all()
 
@@ -617,8 +788,8 @@ class LedgerApp(tk.Tk):
         if not messagebox.askyesno("Unmark paid", f"Put this scheduled item back into cashflow?\n\n{event_date} - {original_type} - {event_name}"):
             return
         self.db.execute(
-            "DELETE FROM paid_scheduled WHERE event_date=? AND event_type=? AND event_name=?",
-            (event_date, original_type, event_name),
+            "DELETE FROM paid_scheduled WHERE ledger_id=? AND event_date=? AND event_type=? AND event_name=?",
+            (self.ledger_id, event_date, original_type, event_name),
         )
         self.refresh_all()
 
@@ -641,11 +812,17 @@ class LedgerApp(tk.Tk):
             "Notes": "Actual amount for this occurrence",
         }
         def save(v):
-            self.db.execute(
-                "INSERT INTO scheduled_overrides(event_date,event_type,event_name,amount,notes) VALUES(?,?,?,?,?) "
-                "ON CONFLICT(event_date,event_type,event_name) DO UPDATE SET amount=excluded.amount, notes=excluded.notes",
-                (event_date, event_type, event_name, self.num(v["Amount"]), v["Notes"]),
+            existing = self.db.one(
+                "SELECT id FROM scheduled_overrides WHERE ledger_id=? AND event_date=? AND event_type=? AND event_name=?",
+                (self.ledger_id, event_date, event_type, event_name),
             )
+            if existing:
+                self.db.execute("UPDATE scheduled_overrides SET amount=?,notes=? WHERE id=? AND ledger_id=?", (self.num(v["Amount"]), v["Notes"], existing["id"], self.ledger_id))
+            else:
+                self.db.execute(
+                    "INSERT INTO scheduled_overrides(event_date,event_type,event_name,amount,notes,ledger_id) VALUES(?,?,?,?,?,?)",
+                    (event_date, event_type, event_name, self.num(v["Amount"]), v["Notes"], self.ledger_id),
+                )
         self.form(f"Set amount for {event_name}", [("Amount","text",()),("Notes","text",())], initial, save)
 
     def clear_upcoming_amount(self):
@@ -662,40 +839,62 @@ class LedgerApp(tk.Tk):
         if not messagebox.askyesno("Clear amount override", f"Use the normal recurring amount again?\n\n{event_date} - {event_type} - {event_name}"):
             return
         self.db.execute(
-            "DELETE FROM scheduled_overrides WHERE event_date=? AND event_type=? AND event_name=?",
-            (event_date, event_type, event_name),
+            "DELETE FROM scheduled_overrides WHERE ledger_id=? AND event_date=? AND event_type=? AND event_name=?",
+            (self.ledger_id, event_date, event_type, event_name),
         )
         self.refresh_all()
 
     def edit_bill(self):
         key=self.selected(self.bill_tree)
-        if key: self.bill_dialog(self.db.one("SELECT * FROM bills WHERE id=?",(key,)))
+        if key: self.bill_dialog(self.db.one("SELECT * FROM bills WHERE id=? AND ledger_id=?",(key,self.ledger_id)))
     def edit_income(self):
         key=self.selected(self.income_tree)
-        if key: self.income_dialog(self.db.one("SELECT * FROM income WHERE id=?",(key,)))
+        if key: self.income_dialog(self.db.one("SELECT * FROM income WHERE id=? AND ledger_id=?",(key,self.ledger_id)))
     def edit_card(self):
         key=self.selected(self.cc_tree)
-        if key: self.card_dialog(self.db.one("SELECT * FROM cards WHERE id=?",(key,)))
+        if key: self.card_dialog(self.db.one("SELECT * FROM cards WHERE id=? AND ledger_id=?",(key,self.ledger_id)))
     def edit_cc_spending(self):
-        key=self.selected(self.cc_spend_tree)
-        if key: self.cc_spending_dialog(self.db.one("SELECT * FROM cc_spending WHERE id=?",(key,)))
+        self.edit_spending()
+    def edit_spending(self):
+        key=self.selected_raw(self.cc_spend_tree)
+        if not key:
+            return
+        kind, raw_id = key.split(":", 1)
+        if kind == "cash":
+            row = self.db.one("SELECT *, 'cash' kind FROM transactions WHERE id=? AND ledger_id=?", (int(raw_id), self.ledger_id))
+        else:
+            row = self.db.one("SELECT *, 'card' kind FROM cc_spending WHERE id=? AND ledger_id=?", (int(raw_id), self.ledger_id))
+        if row:
+            self.cc_spending_dialog(row)
     def edit_transaction(self):
         key=self.selected(self.transaction_tree)
-        if key: self.transaction_dialog(self.db.one("SELECT * FROM transactions WHERE id=?",(key,)))
+        if key: self.transaction_dialog(self.db.one("SELECT * FROM transactions WHERE id=? AND ledger_id=?",(key,self.ledger_id)))
     def delete(self, table, tree):
         key=self.selected(tree)
         label = {"bills": "bill", "income": "income source", "cards": "credit card", "transactions": "transaction", "cc_spending": "credit-card spending item"}.get(table, "item")
-        if key and messagebox.askyesno("Delete", f"Delete the selected {label}?", parent=self): self.db.execute(f"DELETE FROM {table} WHERE id=?",(key,)); self.refresh_all()
+        if key and messagebox.askyesno("Delete", f"Delete the selected {label}?", parent=self): self.db.execute(f"DELETE FROM {table} WHERE id=? AND ledger_id=?",(key,self.ledger_id)); self.refresh_all()
     def delete_bill(self): self.delete("bills",self.bill_tree)
     def delete_income(self): self.delete("income",self.income_tree)
     def delete_card(self): self.delete("cards",self.cc_tree)
     def delete_transaction(self): self.delete("transactions",self.transaction_tree)
     def delete_cc_spending(self): self.delete("cc_spending",self.cc_spend_tree)
+    def delete_spending(self):
+        key = self.selected_raw(self.cc_spend_tree)
+        if not key:
+            return
+        kind, raw_id = key.split(":", 1)
+        label = "cashflow spending" if kind == "cash" else "credit-card spending"
+        if not messagebox.askyesno("Delete", f"Delete the selected {label}?", parent=self):
+            return
+        table = "transactions" if kind == "cash" else "cc_spending"
+        self.db.execute(f"DELETE FROM {table} WHERE id=? AND ledger_id=?", (int(raw_id), self.ledger_id))
+        self.refresh_all()
 
     def import_csv(self):
         path=filedialog.askopenfilename(title="Choose bank statement CSV",filetypes=[("CSV files","*.csv")])
         if not path:return
         imported=0
+        cash = self.cash_account()
         try:
             with open(path, newline="", encoding="utf-8-sig") as stream:
                 for raw in csv.DictReader(stream):
@@ -705,7 +904,10 @@ class LedgerApp(tk.Tk):
                     raw_amount=next((data[k] for k in data if k in ("amount","debit","transaction amount")), "")
                     amount=self.num(raw_amount)
                     if amount <= 0: continue
-                    self.db.execute("INSERT INTO transactions(trans_date,description,amount,category,source) VALUES(?,?,?,?,?)",(self.valid_date(raw_date),desc,amount,"Other",Path(path).name)); imported+=1
+                    self.db.execute(
+                        "INSERT INTO transactions(trans_date,description,amount,category,source,account_id,ledger_id) VALUES(?,?,?,?,?,?,?)",
+                        (self.valid_date(raw_date),desc,amount,"Other",Path(path).name,cash["id"],self.ledger_id),
+                    ); imported+=1
             self.refresh_all(); messagebox.showinfo("Import complete", f"Imported {imported} spending transactions. Review categories in the database as needed.")
         except (OSError, csv.Error, ValueError) as e: messagebox.showerror("Could not import", f"That CSV could not be read: {e}")
 
@@ -738,8 +940,8 @@ class LedgerApp(tk.Tk):
                 return
             with self.db.conn:
                 self.db.conn.executemany(
-                    "INSERT INTO transactions(trans_date,description,amount,category,source) VALUES(?,?,?,?,?)",
-                    candidates,
+                    "INSERT INTO transactions(trans_date,description,amount,category,source,account_id,ledger_id) VALUES(?,?,?,?,?,?,?)",
+                    [row + (self.cash_account()["id"], self.ledger_id) for row in candidates],
                 )
             self.refresh_all()
             messagebox.showinfo("PDF import complete", f"Imported {len(candidates)} possible spending transactions. Please review them.")
@@ -807,16 +1009,17 @@ class LedgerApp(tk.Tk):
             return
         try:
             payload = {
-                "app": "Pocket Ledger", "format_version": 1,
+                "app": "Pocket Ledger", "format_version": 2,
                 "exported_at": datetime.now().isoformat(timespec="seconds"),
-                "bills": [dict(row) for row in self.db.rows("SELECT name,due_day,amount,category,paid_from,notes FROM bills")],
-                "income": [dict(row) for row in self.db.rows("SELECT name,amount,frequency,pay_day,notes FROM income")],
-                "cards": [dict(row) for row in self.db.rows("SELECT name,balance,credit_limit,apr,minimum_payment,due_day,notes FROM cards")],
-                "transactions": [dict(row) for row in self.db.rows("SELECT trans_date,description,amount,category,source FROM transactions")],
-                "cc_spending": [dict(row) for row in self.db.rows("SELECT spend_date,card_id,description,amount,category,notes FROM cc_spending")],
-                "paid_scheduled": [dict(row) for row in self.db.rows("SELECT event_date,event_type,event_name,amount,paid_date,notes FROM paid_scheduled")],
-                "scheduled_overrides": [dict(row) for row in self.db.rows("SELECT event_date,event_type,event_name,amount,notes FROM scheduled_overrides")],
-                "settings": [dict(row) for row in self.db.rows("SELECT key,value FROM settings")],
+                "ledger": dict(self.db.one("SELECT id,name,notes FROM ledgers WHERE id=?", (self.ledger_id,))),
+                "cash_accounts": [dict(row) for row in self.db.rows("SELECT name,starting_balance,start_date,notes FROM cash_accounts WHERE ledger_id=?", (self.ledger_id,))],
+                "bills": [dict(row) for row in self.db.rows("SELECT name,due_day,amount,category,paid_from,notes FROM bills WHERE ledger_id=?", (self.ledger_id,))],
+                "income": [dict(row) for row in self.db.rows("SELECT name,amount,frequency,pay_day,notes FROM income WHERE ledger_id=?", (self.ledger_id,))],
+                "cards": [dict(row) for row in self.db.rows("SELECT id,name,balance,credit_limit,apr,minimum_payment,due_day,notes FROM cards WHERE ledger_id=?", (self.ledger_id,))],
+                "transactions": [dict(row) for row in self.db.rows("SELECT trans_date,description,amount,category,source FROM transactions WHERE ledger_id=?", (self.ledger_id,))],
+                "cc_spending": [dict(row) for row in self.db.rows("SELECT spend_date,card_id,description,amount,category,notes FROM cc_spending WHERE ledger_id=?", (self.ledger_id,))],
+                "paid_scheduled": [dict(row) for row in self.db.rows("SELECT event_date,event_type,event_name,amount,paid_date,notes FROM paid_scheduled WHERE ledger_id=?", (self.ledger_id,))],
+                "scheduled_overrides": [dict(row) for row in self.db.rows("SELECT event_date,event_type,event_name,amount,notes FROM scheduled_overrides WHERE ledger_id=?", (self.ledger_id,))],
             }
             with open(path, "w", encoding="utf-8") as stream:
                 json.dump(payload, stream, indent=2)
@@ -854,36 +1057,46 @@ class LedgerApp(tk.Tk):
             messagebox.showerror("Import failed", str(e))
             return
         if not messagebox.askyesno(
-            "Import full data", "This will add the imported bills, income, cards, and transactions to your current data. "
+            "Import full data", "This will add the imported bills, income, cards, and transactions to the currently selected ledger. "
             "Make a backup first if you may want to undo it. Continue?"
         ):
             return
         try:
+            cash = self.cash_account()
+            card_id_map = {}
             with self.db.conn:
                 self.db.conn.executemany(
-                    "INSERT INTO bills(name,due_day,amount,category,paid_from,notes) VALUES(:name,:due_day,:amount,:category,:paid_from,:notes)", data["bills"]
+                    "INSERT INTO bills(name,due_day,amount,category,paid_from,notes,ledger_id) VALUES(:name,:due_day,:amount,:category,:paid_from,:notes,:ledger_id)",
+                    [dict(row, ledger_id=self.ledger_id) for row in data["bills"]]
                 )
                 self.db.conn.executemany(
-                    "INSERT INTO income(name,amount,frequency,pay_day,notes) VALUES(:name,:amount,:frequency,:pay_day,:notes)", data["income"]
+                    "INSERT INTO income(name,amount,frequency,pay_day,notes,ledger_id) VALUES(:name,:amount,:frequency,:pay_day,:notes,:ledger_id)",
+                    [dict(row, ledger_id=self.ledger_id) for row in data["income"]]
+                )
+                for card in data["cards"]:
+                    old_id = card.get("id")
+                    clean = {key: card.get(key) for key in ("name","balance","credit_limit","apr","minimum_payment","due_day","notes")}
+                    cursor = self.db.conn.execute(
+                        "INSERT INTO cards(name,balance,credit_limit,apr,minimum_payment,due_day,notes,ledger_id) VALUES(:name,:balance,:credit_limit,:apr,:minimum_payment,:due_day,:notes,:ledger_id)",
+                        dict(clean, ledger_id=self.ledger_id),
+                    )
+                    if old_id is not None:
+                        card_id_map[old_id] = cursor.lastrowid
+                self.db.conn.executemany(
+                    "INSERT INTO transactions(trans_date,description,amount,category,source,account_id,ledger_id) VALUES(:trans_date,:description,:amount,:category,:source,:account_id,:ledger_id)",
+                    [dict(row, account_id=cash["id"], ledger_id=self.ledger_id) for row in data["transactions"]]
                 )
                 self.db.conn.executemany(
-                    "INSERT INTO cards(name,balance,credit_limit,apr,minimum_payment,due_day,notes) VALUES(:name,:balance,:credit_limit,:apr,:minimum_payment,:due_day,:notes)", data["cards"]
+                    "INSERT INTO cc_spending(spend_date,card_id,description,amount,category,notes,ledger_id) VALUES(:spend_date,:card_id,:description,:amount,:category,:notes,:ledger_id)",
+                    [dict(row, card_id=card_id_map.get(row.get("card_id"), row.get("card_id")), ledger_id=self.ledger_id) for row in data.get("cc_spending", [])]
                 )
                 self.db.conn.executemany(
-                    "INSERT INTO transactions(trans_date,description,amount,category,source) VALUES(:trans_date,:description,:amount,:category,:source)", data["transactions"]
+                    "INSERT INTO paid_scheduled(event_date,event_type,event_name,amount,paid_date,notes,ledger_id) VALUES(:event_date,:event_type,:event_name,:amount,:paid_date,:notes,:ledger_id)",
+                    [dict(row, ledger_id=self.ledger_id) for row in data.get("paid_scheduled", [])]
                 )
                 self.db.conn.executemany(
-                    "INSERT INTO cc_spending(spend_date,card_id,description,amount,category,notes) VALUES(:spend_date,:card_id,:description,:amount,:category,:notes)", data.get("cc_spending", [])
-                )
-                self.db.conn.executemany(
-                    "INSERT INTO paid_scheduled(event_date,event_type,event_name,amount,paid_date,notes) VALUES(:event_date,:event_type,:event_name,:amount,:paid_date,:notes)", data.get("paid_scheduled", [])
-                )
-                self.db.conn.executemany(
-                    "INSERT INTO scheduled_overrides(event_date,event_type,event_name,amount,notes) VALUES(:event_date,:event_type,:event_name,:amount,:notes) "
-                    "ON CONFLICT(event_date,event_type,event_name) DO UPDATE SET amount=excluded.amount, notes=excluded.notes", data.get("scheduled_overrides", [])
-                )
-                self.db.conn.executemany(
-                    "INSERT INTO settings(key,value) VALUES(:key,:value) ON CONFLICT(key) DO UPDATE SET value=excluded.value", data.get("settings", [])
+                    "INSERT OR IGNORE INTO scheduled_overrides(event_date,event_type,event_name,amount,notes,ledger_id) VALUES(:event_date,:event_type,:event_name,:amount,:notes,:ledger_id)",
+                    [dict(row, ledger_id=self.ledger_id) for row in data.get("scheduled_overrides", [])]
                 )
             self.refresh_all()
             messagebox.showinfo("Import complete", "Your exported data has been added to Pocket Ledger.")
@@ -922,7 +1135,7 @@ class LedgerApp(tk.Tk):
         if not path:
             return
         try:
-            rows = self.db.rows("SELECT trans_date,description,amount,category,source FROM transactions ORDER BY trans_date DESC,id DESC")
+            rows = self.db.rows("SELECT trans_date,description,amount,category,source FROM transactions WHERE ledger_id=? ORDER BY trans_date DESC,id DESC", (self.ledger_id,))
             with open(path, "w", newline="", encoding="utf-8") as stream:
                 writer = csv.writer(stream)
                 writer.writerow(("Date", "Description", "Amount", "Category", "Source"))
@@ -1009,8 +1222,8 @@ class LedgerApp(tk.Tk):
 
     def paid_rows_between(self, start: date, end: date):
         return self.db.rows(
-            "SELECT * FROM paid_scheduled WHERE event_date BETWEEN ? AND ?",
-            (start.isoformat(), end.isoformat()),
+            "SELECT * FROM paid_scheduled WHERE ledger_id=? AND event_date BETWEEN ? AND ?",
+            (self.ledger_id, start.isoformat(), end.isoformat()),
         )
 
     def paid_keys_between(self, start: date, end: date) -> set[tuple[str, str, str]]:
@@ -1021,8 +1234,8 @@ class LedgerApp(tk.Tk):
 
     def override_rows_between(self, start: date, end: date):
         return self.db.rows(
-            "SELECT * FROM scheduled_overrides WHERE event_date BETWEEN ? AND ?",
-            (start.isoformat(), end.isoformat()),
+            "SELECT * FROM scheduled_overrides WHERE ledger_id=? AND event_date BETWEEN ? AND ?",
+            (self.ledger_id, start.isoformat(), end.isoformat()),
         )
 
     def overrides_between(self, start: date, end: date) -> dict[tuple[str, str, str], float]:
@@ -1197,13 +1410,23 @@ class LedgerApp(tk.Tk):
         return "break"
 
     def refresh_all(self):
-        bills=self.db.rows("SELECT * FROM bills ORDER BY due_day,name"); income=self.db.rows("SELECT * FROM income ORDER BY name"); cards=self.db.rows("SELECT * FROM cards ORDER BY name")
-        transactions=self.db.rows("SELECT * FROM transactions ORDER BY trans_date DESC,id DESC")
+        self.refresh_ledger_choice()
+        cash_account = self.cash_account()
+        bills=self.db.rows("SELECT * FROM bills WHERE ledger_id=? ORDER BY due_day,name", (self.ledger_id,))
+        income=self.db.rows("SELECT * FROM income WHERE ledger_id=? ORDER BY name", (self.ledger_id,))
+        cards=self.db.rows("SELECT * FROM cards WHERE ledger_id=? ORDER BY name", (self.ledger_id,))
+        transactions=self.db.rows("""
+            SELECT t.*, COALESCE(a.name, ?) account_name
+            FROM transactions t LEFT JOIN cash_accounts a ON a.id=t.account_id
+            WHERE t.ledger_id=?
+            ORDER BY t.trans_date DESC,t.id DESC
+        """, (cash_account["name"], self.ledger_id))
         cc_spending=self.db.rows("""
             SELECT s.*, COALESCE(c.name,'Unknown card') card_name
             FROM cc_spending s LEFT JOIN cards c ON c.id=s.card_id
+            WHERE s.ledger_id=?
             ORDER BY s.spend_date DESC,s.id DESC
-        """)
+        """, (self.ledger_id,))
         cc_totals = {row["id"]: 0.0 for row in cards}
         for row in cc_spending:
             if row["card_id"] in cc_totals:
@@ -1211,11 +1434,25 @@ class LedgerApp(tk.Tk):
         self.fill(self.bill_tree,bills,lambda r:(r["name"],f"{r['due_day']}{self.suffix(r['due_day'])}",r["category"],r["paid_from"],money(r["amount"])))
         self.fill(self.income_tree,income,lambda r:(r["name"],r["frequency"],r["pay_day"] or "—",money(r["amount"])))
         self.fill(self.cc_tree,cards,lambda r:(r["name"],money(r["balance"]),money(r["credit_limit"]),f"{r['apr']:.2f}%",money(r["minimum_payment"]),r["due_day"] or "—"))
-        self.fill(self.transaction_tree,transactions,lambda r:(r["trans_date"],r["description"],r["category"],money(r["amount"]),r["source"]))
+        self.fill(self.transaction_tree,transactions,lambda r:(r["trans_date"],r["account_name"],r["description"],r["category"],money(r["amount"]),r["source"]))
         self.fill(self.cc_tree,cards,lambda r:(r["name"],money(r["balance"]+cc_totals.get(r["id"],0)),money(r["credit_limit"]-(r["balance"]+cc_totals.get(r["id"],0))),money(r["credit_limit"]),f"{r['apr']:.2f}%",money(r["minimum_payment"]),r["due_day"] or "-"))
-        self.fill(self.cc_spend_tree,cc_spending,lambda r:(r["spend_date"],r["card_name"],r["description"],r["category"],money(r["amount"])))
-        bank_start = self.num(self.db.setting("bank_start_balance", "0"))
-        bank_date = self.db.setting("bank_start_date", date.today().isoformat())
+        mixed_spending = [
+            {
+                "id": f"cash:{row['id']}", "date": row["trans_date"], "account": row["account_name"],
+                "description": row["description"], "category": row["category"], "amount": row["amount"], "cashflow": "Yes",
+            }
+            for row in transactions if row["category"] != EXTRA_INCOME_CATEGORY
+        ] + [
+            {
+                "id": f"card:{row['id']}", "date": row["spend_date"], "account": row["card_name"],
+                "description": row["description"], "category": row["category"], "amount": row["amount"], "cashflow": "No",
+            }
+            for row in cc_spending
+        ]
+        mixed_spending.sort(key=lambda r: (r["date"], r["id"]), reverse=True)
+        self.fill(self.cc_spend_tree,mixed_spending,lambda r:(r["date"],r["account"],r["description"],r["category"],money(r["amount"]),r["cashflow"]))
+        bank_start = float(cash_account["starting_balance"] or 0)
+        bank_date = cash_account["start_date"] or date.today().isoformat()
         start_date = self.parse_iso_date(bank_date)
         today = date.today()
         forecast_end = today + timedelta(days=45)
@@ -1224,12 +1461,12 @@ class LedgerApp(tk.Tk):
         income_received = self.scheduled_income_between(income, start_date, today)
         due_outflow = self.scheduled_checking_outflow_between(bills, cards, transactions, start_date, today, paid_keys, overrides)
         spending_row = self.db.one(
-            "SELECT COALESCE(SUM(amount),0) total FROM transactions WHERE trans_date BETWEEN ? AND ? AND category<>?",
-            (start_date.isoformat(), today.isoformat(), EXTRA_INCOME_CATEGORY),
+            "SELECT COALESCE(SUM(amount),0) total FROM transactions WHERE ledger_id=? AND trans_date BETWEEN ? AND ? AND category<>?",
+            (self.ledger_id, start_date.isoformat(), today.isoformat(), EXTRA_INCOME_CATEGORY),
         )
         extra_income_row = self.db.one(
-            "SELECT COALESCE(SUM(amount),0) total FROM transactions WHERE trans_date BETWEEN ? AND ? AND category=?",
-            (start_date.isoformat(), today.isoformat(), EXTRA_INCOME_CATEGORY),
+            "SELECT COALESCE(SUM(amount),0) total FROM transactions WHERE ledger_id=? AND trans_date BETWEEN ? AND ? AND category=?",
+            (self.ledger_id, start_date.isoformat(), today.isoformat(), EXTRA_INCOME_CATEGORY),
         )
         actual_spending = spending_row["total"] if spending_row else 0
         extra_income = extra_income_row["total"] if extra_income_row else 0
@@ -1241,7 +1478,7 @@ class LedgerApp(tk.Tk):
         self.projected_var.set(money(cash_today))
         self.card_var.set(money(sum(r["balance"] + cc_totals.get(r["id"], 0) for r in cards)))
         self.account_math_var.set(
-            f"{money(bank_start)} bank start ({bank_date}) + {money(income_received)} received income + {money(extra_income)} extra income "
+            f"{money(bank_start)} {cash_account['name']} start ({bank_date}) + {money(income_received)} received income + {money(extra_income)} extra income "
             f"- {money(due_outflow)} bank/ACH bills and card mins due through today - {money(actual_spending)} spending "
             f"= {money(cash_today)} cash today"
         )
@@ -1361,22 +1598,22 @@ class LedgerApp(tk.Tk):
         month=self.month_var.get().strip()
         rows=self.db.rows("""
             SELECT category,SUM(amount) total,COUNT(*) count FROM (
-                SELECT category,amount FROM transactions WHERE substr(trans_date,1,7)=? AND category<>?
+                SELECT category,amount FROM transactions WHERE ledger_id=? AND substr(trans_date,1,7)=? AND category<>?
                 UNION ALL
-                SELECT category,amount FROM cc_spending WHERE substr(spend_date,1,7)=?
+                SELECT category,amount FROM cc_spending WHERE ledger_id=? AND substr(spend_date,1,7)=?
             )
             GROUP BY category ORDER BY total DESC
-        """,(month,EXTRA_INCOME_CATEGORY,month))
+        """,(self.ledger_id,month,EXTRA_INCOME_CATEGORY,self.ledger_id,month))
         total=sum(r["total"] for r in rows); count=sum(r["count"] for r in rows)
         details=self.db.rows("""
             SELECT category,description,source,SUM(amount) total,COUNT(*) count FROM (
-                SELECT category,description,'Bank' source,amount FROM transactions WHERE substr(trans_date,1,7)=? AND category<>?
+                SELECT category,description,'Cashflow account' source,amount FROM transactions WHERE ledger_id=? AND substr(trans_date,1,7)=? AND category<>?
                 UNION ALL
-                SELECT category,description,'Credit card' source,amount FROM cc_spending WHERE substr(spend_date,1,7)=?
+                SELECT category,description,'Credit card' source,amount FROM cc_spending WHERE ledger_id=? AND substr(spend_date,1,7)=?
             )
             GROUP BY category,description,source
             ORDER BY category,total DESC,description
-        """,(month,EXTRA_INCOME_CATEGORY,month))
+        """,(self.ledger_id,month,EXTRA_INCOME_CATEGORY,self.ledger_id,month))
         top_category = rows[0]["category"] if rows else "—"
         avg = total / count if count else 0
         self.insight_total.set(money(total)); self.insight_count.set(str(count)); self.insight_top_category.set(top_category); self.insight_avg.set(money(avg)); self.chart_data=rows; self.insight_details=details
