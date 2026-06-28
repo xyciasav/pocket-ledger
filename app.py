@@ -248,7 +248,7 @@ class LedgerApp(tk.Tk):
         ttk.Button(header, text="Refresh", command=self.refresh_all).pack(side="right")
 
     def ledger_rows(self):
-        return self.db.rows("SELECT * FROM ledgers ORDER BY name")
+        return self.db.rows("SELECT * FROM ledgers ORDER BY id")
 
     def refresh_ledger_choice(self) -> None:
         ledgers = self.ledger_rows()
@@ -558,6 +558,9 @@ class LedgerApp(tk.Tk):
     def sort_tree(self, tree, col, reverse):
         def key(value):
             text = str(value).replace("$", "").replace(",", "").replace("+", "").strip()
+            ordinal = re.fullmatch(r"(\d+)(?:st|nd|rd|th)?", text.lower())
+            if ordinal:
+                return float(ordinal.group(1))
             try:
                 return float(text)
             except ValueError:
