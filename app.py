@@ -23,7 +23,7 @@ if "--self-test-tk" in sys.argv:
 APP_DIR = Path.home() / "PocketLedger"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = APP_DIR / "budget.db"
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.1.2"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 DEFAULT_LEDGER_NAME = "Personal"
 DEFAULT_CASH_ACCOUNT_NAME = "Main checking"

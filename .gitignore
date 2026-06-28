@@ -4,6 +4,8 @@ build/
 dist/
 build_release/
 dist_release/
+build_release_v*/
+dist_release_v*/
 *.spec
 .venv/
 .tmp_profile/
