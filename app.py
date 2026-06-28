@@ -6,6 +6,7 @@ import csv
 import json
 import re
 import sqlite3
+import sys
 import urllib.error
 import urllib.request
 import webbrowser
@@ -15,10 +16,14 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 
+if "--self-test-tk" in sys.argv:
+    print(f"tkinter ok: Tk {tk.TkVersion}")
+    raise SystemExit(0)
+
 APP_DIR = Path.home() / "PocketLedger"
 APP_DIR.mkdir(exist_ok=True)
 DB_PATH = APP_DIR / "budget.db"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 CATEGORIES = ("Fixed", "Utilities", "Other")
 EXTRA_INCOME_CATEGORY = "Extra Income"

@@ -24,9 +24,11 @@ py -m pip install -r requirements.txt
 py -m PyInstaller --noconfirm --clean --windowed --onefile ^
   --hidden-import pypdf ^
   --hidden-import tkinter ^
+  --runtime-hook pyi_rth_tkinter_local.py ^
   --add-binary "%PYBASE%\DLLs\_tkinter.pyd;." ^
   --add-binary "%PYBASE%\DLLs\tcl86t.dll;." ^
   --add-binary "%PYBASE%\DLLs\tk86t.dll;." ^
+  --add-data "%PYBASE%\Lib\tkinter;tkinter" ^
   --add-data "%PYBASE%\tcl;tcl" ^
   --name "Pocket Ledger" ^
   --distpath dist_release ^
