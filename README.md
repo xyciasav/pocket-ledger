@@ -43,7 +43,15 @@ Use **Export full data** to create one portable `.json` file containing all bill
 
 ## Run it
 
-Install Python 3.11+ for Windows, then double-click `app.py`, or run:
+The easiest option is to download the Windows ZIP from the GitHub release and run `Pocket Ledger.exe`.
+
+If running from source, install the standard Python 3.11+ for Windows from python.org. Pocket Ledger uses Tkinter, so the Python you use must pass:
+
+```powershell
+py -c "import tkinter"
+```
+
+Then double-click `app.py`, or run:
 
 ```powershell
 py app.py
