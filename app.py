@@ -210,17 +210,22 @@ class LedgerApp(tk.Tk):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=24, pady=(0, 24))
         self.dashboard_tab = ttk.Frame(self.notebook, padding=18)
-        self.cashflow_tab = ttk.Frame(self.notebook, padding=18)
-        self.setup_tab = ttk.Frame(self.notebook, padding=18)
-        self.spending_tab = ttk.Frame(self.notebook, padding=18)
-        self.data_tab = ttk.Frame(self.notebook, padding=18)
-        self.settings_tab = ttk.Frame(self.notebook, padding=18)
+        self.cashflow_tab_outer = ttk.Frame(self.notebook)
+        self.setup_tab_outer = ttk.Frame(self.notebook)
+        self.spending_tab_outer = ttk.Frame(self.notebook)
+        self.data_tab_outer = ttk.Frame(self.notebook)
+        self.settings_tab_outer = ttk.Frame(self.notebook)
         self.notebook.add(self.dashboard_tab, text="  Dashboard  ")
-        self.notebook.add(self.cashflow_tab, text="  Cashflow  ")
-        self.notebook.add(self.setup_tab, text="  Setup  ")
-        self.notebook.add(self.spending_tab, text="  Spending  ")
-        self.notebook.add(self.data_tab, text="  Insights  ")
-        self.notebook.add(self.settings_tab, text="  Settings  ")
+        self.notebook.add(self.cashflow_tab_outer, text="  Cashflow  ")
+        self.notebook.add(self.setup_tab_outer, text="  Setup  ")
+        self.notebook.add(self.spending_tab_outer, text="  Spending  ")
+        self.notebook.add(self.data_tab_outer, text="  Insights  ")
+        self.notebook.add(self.settings_tab_outer, text="  Settings  ")
+        self.cashflow_tab = self.scrollable_tab(self.cashflow_tab_outer)
+        self.setup_tab = self.scrollable_tab(self.setup_tab_outer)
+        self.spending_tab = self.scrollable_tab(self.spending_tab_outer)
+        self.data_tab = self.scrollable_tab(self.data_tab_outer)
+        self.settings_tab = self.scrollable_tab(self.settings_tab_outer)
         self.build_dashboard()
         self.build_cashflow()
         self.build_setup()
@@ -267,6 +272,23 @@ class LedgerApp(tk.Tk):
         ttk.Button(header, text="Back up data", command=self.backup_data).pack(side="right", padx=(8, 0))
         ttk.Button(header, text="Export spending CSV", command=self.export_transactions).pack(side="right")
         ttk.Button(header, text="Refresh", command=self.refresh_all).pack(side="right")
+
+    def scrollable_tab(self, outer: ttk.Frame) -> ttk.Frame:
+        canvas = tk.Canvas(outer, background="#f5f7fb", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        inner = ttk.Frame(canvas, padding=18)
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda _: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
+        def wheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+        canvas.bind("<MouseWheel>", wheel)
+        inner.bind("<MouseWheel>", wheel)
+        return inner
 
     def ledger_rows(self):
         return self.db.rows("SELECT * FROM ledgers ORDER BY id")
@@ -385,8 +407,8 @@ class LedgerApp(tk.Tk):
 
         forecast = ttk.Frame(self.cashflow_tab, style="Card.TFrame", padding=14)
         forecast.pack(fill="both", expand=True)
-        ttk.Label(forecast, text="UPCOMING CASHFLOW", style="CardTitle.TLabel").pack(anchor="w")
-        ttk.Label(forecast, text="Next 45 days: income coming in, bills/card minimums going out, and future-dated spending transactions.", style="Subtitle.TLabel").pack(anchor="w", pady=(5, 10))
+        ttk.Label(forecast, text="CASHFLOW TIMELINE", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(forecast, text="Last 14 days, today, and next 45 days: income, bills/card minimums, and dated spending transactions.", style="Subtitle.TLabel").pack(anchor="w", pady=(5, 10))
         self.upcoming_tree = self.tree(forecast, ("Date", "Type", "Name", "Amount", "Running cash"), (115, 150, 520, 130, 140))
         self.upcoming_tree.pack(fill="both", expand=True)
         self.upcoming_tree.tag_configure("income", background="#eaf7ef")
@@ -1379,6 +1401,15 @@ class LedgerApp(tk.Tk):
                 total += row["amount"]
         return total
 
+    def cash_balance_on(self, bank_start: float, start_date: date, target: date, income, bills, cards, transactions, paid_keys=None, overrides=None) -> float:
+        if target <= start_date:
+            return bank_start
+        end = target - timedelta(days=1)
+        income_received = self.scheduled_income_between(income, start_date, end)
+        due_outflow = self.scheduled_checking_outflow_between(bills, cards, transactions, start_date, end, paid_keys, overrides)
+        spending = self.transaction_total_between(transactions, start_date, end)
+        return bank_start + income_received - due_outflow - spending
+
     def scheduled_checking_outflow_between(self, bills, cards, transactions, start: date, end: date, paid_keys=None, overrides=None) -> float:
         paid_keys = paid_keys or set()
         bill_total = 0.0
@@ -1571,6 +1602,7 @@ class LedgerApp(tk.Tk):
         bank_date = cash_account["start_date"] or date.today().isoformat()
         start_date = self.parse_iso_date(bank_date)
         today = date.today()
+        history_start = max(start_date, today - timedelta(days=14))
         forecast_end = today + timedelta(days=45)
         paid_keys = self.paid_keys_between(start_date, forecast_end)
         overrides = self.overrides_between(start_date, forecast_end)
@@ -1606,7 +1638,9 @@ class LedgerApp(tk.Tk):
             lambda r: (r["period"], money(r["starting"]), money(r["income"]), money(r["due"]), money(r["after"]), money(r["safe"]), money(r["daily"])),
             lambda r: "good" if r["after"] >= 0 and r["safe"] > 0 else "warning",
         )
-        upcoming = self.upcoming_events(bills, income, cards, future_transactions, cash_today, today + timedelta(days=1), forecast_end, paid_keys, overrides)
+        timeline_start_cash = self.cash_balance_on(bank_start, start_date, history_start, income, bills, cards, transactions, paid_keys, overrides)
+        timeline_transactions = [row for row in transactions if self.parse_iso_date(row["trans_date"], today) >= history_start]
+        upcoming = self.upcoming_events(bills, income, cards, timeline_transactions, timeline_start_cash, history_start, forecast_end, paid_keys, overrides)
         self.current_upcoming = upcoming
         incoming_total = sum(row["amount"] for row in upcoming if row["amount"] > 0)
         outgoing_total = abs(sum(row["amount"] for row in upcoming if row["amount"] < 0))
