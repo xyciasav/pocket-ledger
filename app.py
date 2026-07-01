@@ -24,11 +24,16 @@ if "--self-test-tk" in sys.argv:
 APP_DIR = Path.home() / "PocketLedger"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = APP_DIR / "budget.db"
-APP_VERSION = "0.1.4"
+APP_VERSION = "0.1.5"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
 WHATS_NEW = {
+    "0.1.5": [
+        "Added vertical scrolling to Cashflow, Setup, Spending, Insights, and Settings tabs.",
+        "Cashflow now shows a timeline with the last 14 days, today, and the next 45 days.",
+        "The Cashflow Timeline running balance now starts from the beginning of the lookback window so recent past activity connects to today's cash.",
+    ],
     "0.1.4": [
         "Insights now has view filters for full monthly obligations, spending transactions, scheduled bills, credit-card spending, and cashflow-account spending.",
         "Added an Insights category filter so you can focus on one category without losing the visual breakdown.",
