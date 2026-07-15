@@ -24,11 +24,17 @@ if "--self-test-tk" in sys.argv:
 APP_DIR = Path.home() / "PocketLedger"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = APP_DIR / "budget.db"
-APP_VERSION = "0.1.7"
+APP_VERSION = "0.1.8"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
 WHATS_NEW = {
+    "0.1.8": [
+        "Dashboard wording now separates checking cash from credit-card pressure so the top numbers are easier to understand.",
+        "Cashflow account transactions can now link a Credit Card Payment to the specific card it pays.",
+        "Tracked card balances now account for linked checking payments, so card debt and remaining room better reflect paybacks.",
+        "Full data export/import now preserves linked card payment relationships.",
+    ],
     "0.1.7": [
         "Cashflow baseline balance now works like a true as-of balance instead of adding same-day activity on top.",
         "Cashflow Timeline keeps the last 14 days visible even after resetting the baseline to today.",
@@ -129,6 +135,7 @@ class Database:
         for table in ("bills", "income", "cards", "transactions", "cc_spending", "paid_scheduled", "scheduled_overrides"):
             self.ensure_column(table, "ledger_id", "INTEGER NOT NULL DEFAULT 1")
         self.ensure_column("transactions", "account_id", "INTEGER")
+        self.ensure_column("transactions", "related_card_id", "INTEGER")
         self.ensure_ledger_scoped_overrides()
         self.conn.execute("UPDATE bills SET paid_from=? WHERE paid_from=?", (BANK_MANUAL, BANK_ACCOUNT))
         self.ensure_default_cash_account()
@@ -365,27 +372,29 @@ class LedgerApp(tk.Tk):
         hero = ttk.Frame(dashboard)
         hero.pack(fill="x", pady=(0, 14))
         ttk.Label(hero, text="Dashboard", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(hero, text="Cash today, paycheck pressure, flexible spending room, and upcoming obligations.", style="Subtitle.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Label(hero, text="Checking cash, credit-card pressure, paycheck timing, and upcoming obligations.", style="Subtitle.TLabel").pack(anchor="w", pady=(4, 0))
 
         self.bank_start_var, self.income_var, self.outflow_var, self.spent_var, self.projected_var, self.card_var = (tk.StringVar() for _ in range(6))
         cards = ttk.Frame(dashboard)
         cards.pack(fill="x", pady=(0, 18))
         for i in range(3): cards.columnconfigure(i, weight=1)
-        self.metric_card(cards, "Cash today", self.projected_var, 0, 0)
-        self.metric_card(cards, "Spending since start", self.spent_var, 0, 1)
-        self.metric_card(cards, "Card debt", self.card_var, 0, 2)
-        self.metric_card(cards, "Cashflow start", self.bank_start_var, 1, 0)
-        self.metric_card(cards, "Income received", self.income_var, 1, 1)
-        self.metric_card(cards, "Due bills + cards", self.outflow_var, 1, 2)
+        self.metric_card(cards, "Checking today", self.projected_var, 0, 0)
+        self.metric_card(cards, "Checking spending", self.spent_var, 0, 1)
+        self.metric_card(cards, "Cards debt / room", self.card_var, 0, 2)
+        self.metric_card(cards, "Checking baseline", self.bank_start_var, 1, 0)
+        self.metric_card(cards, "Income after baseline", self.income_var, 1, 1)
+        self.metric_card(cards, "Due from checking", self.outflow_var, 1, 2)
 
         account_row = ttk.Frame(dashboard, style="Card.TFrame", padding=(16, 12))
         account_row.pack(fill="x", pady=(0, 14))
         self.account_math_var = tk.StringVar()
+        self.money_model_var = tk.StringVar()
         account_header = ttk.Frame(account_row, style="Card.TFrame")
         account_header.pack(fill="x")
         ttk.Label(account_header, text="ACCOUNT MATH", style="CardTitle.TLabel").pack(side="left")
         ttk.Button(account_header, text="Set cashflow account", command=self.account_dialog).pack(side="right")
         ttk.Label(account_row, textvariable=self.account_math_var, style="Subtitle.TLabel", wraplength=900, justify="left").pack(anchor="w", pady=(7, 0))
+        ttk.Label(account_row, textvariable=self.money_model_var, style="Subtitle.TLabel", wraplength=900, justify="left").pack(anchor="w", pady=(7, 0))
 
         self.cashflow_var = tk.StringVar()
         cashflow = ttk.Frame(dashboard, style="Card.TFrame", padding=(16, 12))
@@ -484,7 +493,7 @@ class LedgerApp(tk.Tk):
 
         self.section_title(bank_frame, "Cashflow account transactions", "Add cashflow transaction", self.transaction_dialog)
         ttk.Label(bank_frame, text="Use this for planned cashflow outflows, money in, and credit-card payments from checking.", style="Subtitle.TLabel").pack(anchor="w", pady=(8, 0))
-        self.transaction_tree = self.tree(bank_frame, ("Date", "Account", "Description", "Category", "Amount", "Source"), (105, 130, 230, 145, 95, 120))
+        self.transaction_tree = self.tree(bank_frame, ("Date", "Account", "Description", "Category", "Card paid", "Amount", "Source"), (105, 130, 220, 135, 130, 95, 110))
         self.transaction_tree.pack(fill="both", expand=True, pady=(10, 8))
         self.transaction_tree.bind("<Double-1>", lambda _: self.edit_transaction())
         bank_buttons = ttk.Frame(bank_frame, style="Card.TFrame")
@@ -810,12 +819,23 @@ class LedgerApp(tk.Tk):
 
     def transaction_dialog(self, row=None):
         cash = self.cash_account()
-        initial = {"Date":date.today().isoformat(),"Category":"Other"} if row is None else {"Date":row["trans_date"],"Description":row["description"],"Amount":row["amount"],"Category":row["category"]}
+        card_choices = ("",) + tuple(f"{card['id']} - {card['name']}" for card in self.db.rows("SELECT id,name FROM cards WHERE ledger_id=? ORDER BY name", (self.ledger_id,)))
+        if row is None:
+            initial = {"Date":date.today().isoformat(),"Category":"Other", "Credit card paid": ""}
+        else:
+            related_card = ""
+            if "related_card_id" in row.keys() and row["related_card_id"]:
+                card = self.db.one("SELECT name FROM cards WHERE id=? AND ledger_id=?", (row["related_card_id"], self.ledger_id))
+                related_card = f"{row['related_card_id']} - {card['name'] if card else 'Unknown card'}"
+            initial = {"Date":row["trans_date"],"Description":row["description"],"Amount":row["amount"],"Category":row["category"],"Credit card paid": related_card}
         def save(v):
-            args=(self.valid_date(v["Date"]),v["Description"],self.num(v["Amount"]),v["Category"])
-            if row: self.db.execute("UPDATE transactions SET trans_date=?,description=?,amount=?,category=? WHERE id=? AND ledger_id=?", args+(row["id"], self.ledger_id))
-            else: self.db.execute("INSERT INTO transactions(trans_date,description,amount,category,source,account_id,ledger_id) VALUES(?,?,?,?,?,?,?)", args+("Manual", cash["id"], self.ledger_id))
-        self.form("Edit bank transaction" if row else "Add transaction", [("Date","text",()),("Description","text",()),("Amount","text",()),("Category","choice",SPENDING_CATEGORIES)], initial, save)
+            related_card_id = int(v["Credit card paid"].split(" - ", 1)[0]) if v["Credit card paid"] else None
+            if v["Category"] != "Credit Card Payment":
+                related_card_id = None
+            args=(self.valid_date(v["Date"]),v["Description"],self.num(v["Amount"]),v["Category"],related_card_id)
+            if row: self.db.execute("UPDATE transactions SET trans_date=?,description=?,amount=?,category=?,related_card_id=? WHERE id=? AND ledger_id=?", args+(row["id"], self.ledger_id))
+            else: self.db.execute("INSERT INTO transactions(trans_date,description,amount,category,related_card_id,source,account_id,ledger_id) VALUES(?,?,?,?,?,?,?,?)", args+("Manual", cash["id"], self.ledger_id))
+        self.form("Edit cashflow transaction" if row else "Add cashflow transaction", [("Date","text",()),("Description","text",()),("Amount","text",()),("Category","choice",SPENDING_CATEGORIES),("Credit card paid","choice",card_choices)], initial, save)
 
     def money_in_dialog(self):
         cash = self.cash_account()
@@ -1166,7 +1186,7 @@ class LedgerApp(tk.Tk):
                 "bills": [dict(row) for row in self.db.rows("SELECT name,due_day,amount,category,paid_from,notes FROM bills WHERE ledger_id=?", (self.ledger_id,))],
                 "income": [dict(row) for row in self.db.rows("SELECT name,amount,frequency,pay_day,notes FROM income WHERE ledger_id=?", (self.ledger_id,))],
                 "cards": [dict(row) for row in self.db.rows("SELECT id,name,balance,credit_limit,apr,minimum_payment,due_day,notes FROM cards WHERE ledger_id=?", (self.ledger_id,))],
-                "transactions": [dict(row) for row in self.db.rows("SELECT trans_date,description,amount,category,source FROM transactions WHERE ledger_id=?", (self.ledger_id,))],
+                "transactions": [dict(row) for row in self.db.rows("SELECT trans_date,description,amount,category,source,related_card_id FROM transactions WHERE ledger_id=?", (self.ledger_id,))],
                 "cc_spending": [dict(row) for row in self.db.rows("SELECT spend_date,card_id,description,amount,category,notes FROM cc_spending WHERE ledger_id=?", (self.ledger_id,))],
                 "paid_scheduled": [dict(row) for row in self.db.rows("SELECT event_date,event_type,event_name,amount,paid_date,notes FROM paid_scheduled WHERE ledger_id=?", (self.ledger_id,))],
                 "scheduled_overrides": [dict(row) for row in self.db.rows("SELECT event_date,event_type,event_name,amount,notes FROM scheduled_overrides WHERE ledger_id=?", (self.ledger_id,))],
@@ -1203,6 +1223,8 @@ class LedgerApp(tk.Tk):
                 if bill.get("paid_from") == BANK_ACCOUNT:
                     bill["paid_from"] = BANK_MANUAL
                 bill.setdefault("paid_from", BANK_MANUAL)
+            for transaction in data["transactions"]:
+                transaction.setdefault("related_card_id", None)
         except (OSError, json.JSONDecodeError, ValueError) as e:
             messagebox.showerror("Import failed", str(e))
             return
@@ -1233,8 +1255,8 @@ class LedgerApp(tk.Tk):
                     if old_id is not None:
                         card_id_map[old_id] = cursor.lastrowid
                 self.db.conn.executemany(
-                    "INSERT INTO transactions(trans_date,description,amount,category,source,account_id,ledger_id) VALUES(:trans_date,:description,:amount,:category,:source,:account_id,:ledger_id)",
-                    [dict(row, account_id=cash["id"], ledger_id=self.ledger_id) for row in data["transactions"]]
+                    "INSERT INTO transactions(trans_date,description,amount,category,source,related_card_id,account_id,ledger_id) VALUES(:trans_date,:description,:amount,:category,:source,:related_card_id,:account_id,:ledger_id)",
+                    [dict(row, related_card_id=card_id_map.get(row.get("related_card_id"), row.get("related_card_id")), account_id=cash["id"], ledger_id=self.ledger_id) for row in data["transactions"]]
                 )
                 self.db.conn.executemany(
                     "INSERT INTO cc_spending(spend_date,card_id,description,amount,category,notes,ledger_id) VALUES(:spend_date,:card_id,:description,:amount,:category,:notes,:ledger_id)",
@@ -1590,8 +1612,9 @@ class LedgerApp(tk.Tk):
         income=self.db.rows("SELECT * FROM income WHERE ledger_id=? ORDER BY name", (self.ledger_id,))
         cards=self.db.rows("SELECT * FROM cards WHERE ledger_id=? ORDER BY name", (self.ledger_id,))
         transactions=self.db.rows("""
-            SELECT t.*, COALESCE(a.name, ?) account_name
+            SELECT t.*, COALESCE(a.name, ?) account_name, COALESCE(c.name,'') related_card_name
             FROM transactions t LEFT JOIN cash_accounts a ON a.id=t.account_id
+            LEFT JOIN cards c ON c.id=t.related_card_id
             WHERE t.ledger_id=?
             ORDER BY t.trans_date DESC,t.id DESC
         """, (cash_account["name"], self.ledger_id))
@@ -1605,11 +1628,14 @@ class LedgerApp(tk.Tk):
         for row in cc_spending:
             if row["card_id"] in cc_totals:
                 cc_totals[row["card_id"]] += row["amount"]
+        cc_payments = {row["id"]: 0.0 for row in cards}
+        for row in transactions:
+            if row["category"] == "Credit Card Payment" and "related_card_id" in row.keys() and row["related_card_id"] in cc_payments:
+                cc_payments[row["related_card_id"]] += row["amount"]
         self.fill(self.bill_tree,bills,lambda r:(r["name"],f"{r['due_day']}{self.suffix(r['due_day'])}",r["category"],r["paid_from"],money(r["amount"])))
         self.fill(self.income_tree,income,lambda r:(r["name"],r["frequency"],r["pay_day"] or "—",money(r["amount"])))
-        self.fill(self.cc_tree,cards,lambda r:(r["name"],money(r["balance"]),money(r["credit_limit"]),f"{r['apr']:.2f}%",money(r["minimum_payment"]),r["due_day"] or "—"))
-        self.fill(self.transaction_tree,transactions,lambda r:(r["trans_date"],r["account_name"],r["description"],r["category"],money(r["amount"]),r["source"]))
-        self.fill(self.cc_tree,cards,lambda r:(r["name"],money(r["balance"]+cc_totals.get(r["id"],0)),money(r["credit_limit"]-(r["balance"]+cc_totals.get(r["id"],0))),money(r["credit_limit"]),f"{r['apr']:.2f}%",money(r["minimum_payment"]),r["due_day"] or "-"))
+        self.fill(self.transaction_tree,transactions,lambda r:(r["trans_date"],r["account_name"],r["description"],r["category"],r["related_card_name"] or "—",money(r["amount"]),r["source"]))
+        self.fill(self.cc_tree,cards,lambda r:(r["name"],money(r["balance"]+cc_totals.get(r["id"],0)-cc_payments.get(r["id"],0)),money(r["credit_limit"]-(r["balance"]+cc_totals.get(r["id"],0)-cc_payments.get(r["id"],0))),money(r["credit_limit"]),f"{r['apr']:.2f}%",money(r["minimum_payment"]),r["due_day"] or "-"))
         mixed_spending = [
             {
                 "id": f"cash:{row['id']}", "date": row["trans_date"], "account": row["account_name"],
@@ -1652,11 +1678,25 @@ class LedgerApp(tk.Tk):
         self.outflow_var.set(money(due_outflow))
         self.spent_var.set(money(actual_spending))
         self.projected_var.set(money(cash_today))
-        self.card_var.set(money(sum(r["balance"] + cc_totals.get(r["id"], 0) for r in cards)))
+        tracked_card_balances = {r["id"]: r["balance"] + cc_totals.get(r["id"], 0) - cc_payments.get(r["id"], 0) for r in cards}
+        total_card_debt = sum(tracked_card_balances.values())
+        total_card_room = sum(r["credit_limit"] - tracked_card_balances.get(r["id"], 0) for r in cards)
+        tightest_card = min(cards, key=lambda r: r["credit_limit"] - tracked_card_balances.get(r["id"], 0), default=None)
+        tightest_room = (tightest_card["credit_limit"] - tracked_card_balances.get(tightest_card["id"], 0)) if tightest_card else 0
+        self.card_var.set(f"{money(total_card_debt)} debt / {money(total_card_room)} room")
         self.account_math_var.set(
             f"{money(bank_start)} {cash_account['name']} baseline as of {bank_date} + {money(income_received)} income after baseline + {money(extra_income)} extra income after baseline "
             f"- {money(due_outflow)} bank/ACH bills and card mins after baseline - {money(actual_spending)} spending after baseline "
             f"= {money(cash_today)} cash today"
+        )
+        if tightest_card:
+            tightest_text = f" Tightest card room: {tightest_card['name']} has {money(tightest_room)} before its limit."
+        else:
+            tightest_text = ""
+        self.money_model_var.set(
+            "Model: checking cash only changes when money actually hits or leaves the bank. "
+            "Credit-card purchases reduce card room now, then the linked checking payment reduces card debt later without guessing which bill it paid. "
+            f"Card payments should be entered as 'Credit Card Payment' and linked to the card they pay.{tightest_text}"
         )
         future_transactions = [row for row in transactions if self.parse_iso_date(row["trans_date"]) > today]
         room = self.spending_room_periods(bills, income, cards, future_transactions, cash_today, today, paid_keys, overrides)
