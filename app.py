@@ -24,11 +24,16 @@ if "--self-test-tk" in sys.argv:
 APP_DIR = Path.home() / "PocketLedger"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = APP_DIR / "budget.db"
-APP_VERSION = "0.1.6"
+APP_VERSION = "0.1.7"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
 WHATS_NEW = {
+    "0.1.7": [
+        "Cashflow baseline balance now works like a true as-of balance instead of adding same-day activity on top.",
+        "Cashflow Timeline keeps the last 14 days visible even after resetting the baseline to today.",
+        "Older timeline rows are back-calculated for context while today's forecast remains anchored to your baseline.",
+    ],
     "0.1.6": [
         "Restored full-height layout for Spending and Insights so tables, panes, and charts use the available screen space again.",
         "Kept scrolling on Cashflow, Setup, and Settings where page-style scrolling is useful.",
