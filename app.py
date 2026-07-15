@@ -415,7 +415,7 @@ class LedgerApp(tk.Tk):
         forecast = ttk.Frame(self.cashflow_tab, style="Card.TFrame", padding=14)
         forecast.pack(fill="both", expand=True)
         ttk.Label(forecast, text="CASHFLOW TIMELINE", style="CardTitle.TLabel").pack(anchor="w")
-        ttk.Label(forecast, text="Last 14 days, today, and next 45 days: income, bills/card minimums, and dated spending transactions.", style="Subtitle.TLabel").pack(anchor="w", pady=(5, 10))
+        ttk.Label(forecast, text="Last 14 days, today, and next 45 days. If your baseline date is inside this window, earlier rows are back-calculated for context.", style="Subtitle.TLabel").pack(anchor="w", pady=(5, 10))
         self.upcoming_tree = self.tree(forecast, ("Date", "Type", "Name", "Amount", "Running cash"), (115, 150, 520, 130, 140))
         self.upcoming_tree.pack(fill="both", expand=True)
         self.upcoming_tree.tag_configure("income", background="#eaf7ef")
@@ -1418,6 +1418,20 @@ class LedgerApp(tk.Tk):
         spending = self.transaction_total_between(transactions, change_start, end)
         return bank_start + income_received - due_outflow - spending
 
+    def cashflow_net_between(self, income, bills, cards, transactions, start: date, end: date, paid_keys=None, overrides=None) -> float:
+        if start > end:
+            return 0.0
+        return (
+            self.scheduled_income_between(income, start, end)
+            - self.scheduled_checking_outflow_between(bills, cards, transactions, start, end, paid_keys, overrides)
+            - self.transaction_total_between(transactions, start, end)
+        )
+
+    def timeline_starting_cash(self, bank_start: float, start_date: date, timeline_start: date, income, bills, cards, transactions, paid_keys=None, overrides=None) -> float:
+        if timeline_start <= start_date:
+            return bank_start - self.cashflow_net_between(income, bills, cards, transactions, timeline_start, start_date, paid_keys, overrides)
+        return self.cash_balance_on(bank_start, start_date, timeline_start, income, bills, cards, transactions, paid_keys, overrides)
+
     def scheduled_checking_outflow_between(self, bills, cards, transactions, start: date, end: date, paid_keys=None, overrides=None) -> float:
         paid_keys = paid_keys or set()
         bill_total = 0.0
@@ -1610,10 +1624,10 @@ class LedgerApp(tk.Tk):
         bank_date = cash_account["start_date"] or date.today().isoformat()
         start_date = self.parse_iso_date(bank_date)
         today = date.today()
-        history_start = max(start_date, today - timedelta(days=14))
+        history_start = today - timedelta(days=14)
         forecast_end = today + timedelta(days=45)
-        paid_keys = self.paid_keys_between(start_date, forecast_end)
-        overrides = self.overrides_between(start_date, forecast_end)
+        paid_keys = self.paid_keys_between(min(history_start, start_date), forecast_end)
+        overrides = self.overrides_between(min(history_start, start_date), forecast_end)
         change_start = start_date + timedelta(days=1)
         income_received = self.scheduled_income_between(income, change_start, today)
         due_outflow = self.scheduled_checking_outflow_between(bills, cards, transactions, change_start, today, paid_keys, overrides)
@@ -1647,8 +1661,8 @@ class LedgerApp(tk.Tk):
             lambda r: (r["period"], money(r["starting"]), money(r["income"]), money(r["due"]), money(r["after"]), money(r["safe"]), money(r["daily"])),
             lambda r: "good" if r["after"] >= 0 and r["safe"] > 0 else "warning",
         )
-        timeline_start = history_start if history_start > start_date else change_start
-        timeline_start_cash = self.cash_balance_on(bank_start, start_date, timeline_start, income, bills, cards, transactions, paid_keys, overrides)
+        timeline_start = history_start
+        timeline_start_cash = self.timeline_starting_cash(bank_start, start_date, timeline_start, income, bills, cards, transactions, paid_keys, overrides)
         timeline_transactions = [row for row in transactions if self.parse_iso_date(row["trans_date"], today) >= timeline_start]
         upcoming = self.upcoming_events(bills, income, cards, timeline_transactions, timeline_start_cash, timeline_start, forecast_end, paid_keys, overrides)
         self.current_upcoming = upcoming
