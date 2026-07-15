@@ -884,15 +884,15 @@ class LedgerApp(tk.Tk):
     def account_dialog(self):
         initial = {
             "Cashflow account name": self.cash_account()["name"],
-            "Starting balance": self.cash_account()["starting_balance"],
+            "Current/baseline balance": self.cash_account()["starting_balance"],
             "As-of date": self.cash_account()["start_date"] or date.today().isoformat(),
         }
         def save(v):
             self.db.execute(
                 "UPDATE cash_accounts SET name=?,starting_balance=?,start_date=? WHERE id=? AND ledger_id=?",
-                (v["Cashflow account name"], self.num(v["Starting balance"]), self.valid_date(v["As-of date"]), self.cash_account()["id"], self.ledger_id),
+                (v["Cashflow account name"], self.num(v["Current/baseline balance"]), self.valid_date(v["As-of date"]), self.cash_account()["id"], self.ledger_id),
             )
-        self.form("Set cashflow account", [("Cashflow account name","text",()),("Starting balance","text",()),("As-of date","text",())], initial, save)
+        self.form("Set cashflow account", [("Cashflow account name","text",()),("Current/baseline balance","text",()),("As-of date","text",())], initial, save)
 
     def mark_upcoming_paid(self):
         item = self.upcoming_tree.focus()
@@ -1412,9 +1412,10 @@ class LedgerApp(tk.Tk):
         if target <= start_date:
             return bank_start
         end = target - timedelta(days=1)
-        income_received = self.scheduled_income_between(income, start_date, end)
-        due_outflow = self.scheduled_checking_outflow_between(bills, cards, transactions, start_date, end, paid_keys, overrides)
-        spending = self.transaction_total_between(transactions, start_date, end)
+        change_start = start_date + timedelta(days=1)
+        income_received = self.scheduled_income_between(income, change_start, end)
+        due_outflow = self.scheduled_checking_outflow_between(bills, cards, transactions, change_start, end, paid_keys, overrides)
+        spending = self.transaction_total_between(transactions, change_start, end)
         return bank_start + income_received - due_outflow - spending
 
     def scheduled_checking_outflow_between(self, bills, cards, transactions, start: date, end: date, paid_keys=None, overrides=None) -> float:
@@ -1613,15 +1614,16 @@ class LedgerApp(tk.Tk):
         forecast_end = today + timedelta(days=45)
         paid_keys = self.paid_keys_between(start_date, forecast_end)
         overrides = self.overrides_between(start_date, forecast_end)
-        income_received = self.scheduled_income_between(income, start_date, today)
-        due_outflow = self.scheduled_checking_outflow_between(bills, cards, transactions, start_date, today, paid_keys, overrides)
+        change_start = start_date + timedelta(days=1)
+        income_received = self.scheduled_income_between(income, change_start, today)
+        due_outflow = self.scheduled_checking_outflow_between(bills, cards, transactions, change_start, today, paid_keys, overrides)
         spending_row = self.db.one(
             "SELECT COALESCE(SUM(amount),0) total FROM transactions WHERE ledger_id=? AND trans_date BETWEEN ? AND ? AND category<>?",
-            (self.ledger_id, start_date.isoformat(), today.isoformat(), EXTRA_INCOME_CATEGORY),
+            (self.ledger_id, change_start.isoformat(), today.isoformat(), EXTRA_INCOME_CATEGORY),
         )
         extra_income_row = self.db.one(
             "SELECT COALESCE(SUM(amount),0) total FROM transactions WHERE ledger_id=? AND trans_date BETWEEN ? AND ? AND category=?",
-            (self.ledger_id, start_date.isoformat(), today.isoformat(), EXTRA_INCOME_CATEGORY),
+            (self.ledger_id, change_start.isoformat(), today.isoformat(), EXTRA_INCOME_CATEGORY),
         )
         actual_spending = spending_row["total"] if spending_row else 0
         extra_income = extra_income_row["total"] if extra_income_row else 0
@@ -1633,8 +1635,8 @@ class LedgerApp(tk.Tk):
         self.projected_var.set(money(cash_today))
         self.card_var.set(money(sum(r["balance"] + cc_totals.get(r["id"], 0) for r in cards)))
         self.account_math_var.set(
-            f"{money(bank_start)} {cash_account['name']} start ({bank_date}) + {money(income_received)} received income + {money(extra_income)} extra income "
-            f"- {money(due_outflow)} bank/ACH bills and card mins due through today - {money(actual_spending)} spending "
+            f"{money(bank_start)} {cash_account['name']} baseline as of {bank_date} + {money(income_received)} income after baseline + {money(extra_income)} extra income after baseline "
+            f"- {money(due_outflow)} bank/ACH bills and card mins after baseline - {money(actual_spending)} spending after baseline "
             f"= {money(cash_today)} cash today"
         )
         future_transactions = [row for row in transactions if self.parse_iso_date(row["trans_date"]) > today]
@@ -1645,9 +1647,10 @@ class LedgerApp(tk.Tk):
             lambda r: (r["period"], money(r["starting"]), money(r["income"]), money(r["due"]), money(r["after"]), money(r["safe"]), money(r["daily"])),
             lambda r: "good" if r["after"] >= 0 and r["safe"] > 0 else "warning",
         )
-        timeline_start_cash = self.cash_balance_on(bank_start, start_date, history_start, income, bills, cards, transactions, paid_keys, overrides)
-        timeline_transactions = [row for row in transactions if self.parse_iso_date(row["trans_date"], today) >= history_start]
-        upcoming = self.upcoming_events(bills, income, cards, timeline_transactions, timeline_start_cash, history_start, forecast_end, paid_keys, overrides)
+        timeline_start = history_start if history_start > start_date else change_start
+        timeline_start_cash = self.cash_balance_on(bank_start, start_date, timeline_start, income, bills, cards, transactions, paid_keys, overrides)
+        timeline_transactions = [row for row in transactions if self.parse_iso_date(row["trans_date"], today) >= timeline_start]
+        upcoming = self.upcoming_events(bills, income, cards, timeline_transactions, timeline_start_cash, timeline_start, forecast_end, paid_keys, overrides)
         self.current_upcoming = upcoming
         incoming_total = sum(row["amount"] for row in upcoming if row["amount"] > 0)
         outgoing_total = abs(sum(row["amount"] for row in upcoming if row["amount"] < 0))
