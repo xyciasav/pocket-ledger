@@ -11,6 +11,7 @@ import sys
 import urllib.error
 import urllib.request
 import webbrowser
+import zipfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import tkinter as tk
@@ -24,11 +25,16 @@ if "--self-test-tk" in sys.argv:
 APP_DIR = Path.home() / "PocketLedger"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = APP_DIR / "budget.db"
-APP_VERSION = "0.1.9"
+APP_VERSION = "0.1.10"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
 WHATS_NEW = {
+    "0.1.10": [
+        "Added a dedicated Debt tab so credit cards and loans are no longer buried in Setup.",
+        "Improved the updater so downloaded ZIP releases are extracted and can launch the updated exe directly.",
+        "Clarified Setup as the place for income and bills, with Debt handling cards, limits, and personal loans.",
+    ],
     "0.1.9": [
         "Added loans/debt payoff tracking for personal loans with balance, APR, payment, and due date.",
         "Loan payments now appear in Cashflow, Spending Room, and Insights as scheduled checking outflows.",
@@ -244,12 +250,14 @@ class LedgerApp(tk.Tk):
         self.dashboard_tab = ttk.Frame(self.notebook, padding=18)
         self.cashflow_tab_outer = ttk.Frame(self.notebook)
         self.setup_tab_outer = ttk.Frame(self.notebook)
+        self.debt_tab = ttk.Frame(self.notebook, padding=18)
         self.spending_tab = ttk.Frame(self.notebook, padding=18)
         self.data_tab = ttk.Frame(self.notebook, padding=18)
         self.settings_tab_outer = ttk.Frame(self.notebook)
         self.notebook.add(self.dashboard_tab, text="  Dashboard  ")
         self.notebook.add(self.cashflow_tab_outer, text="  Cashflow  ")
         self.notebook.add(self.setup_tab_outer, text="  Setup  ")
+        self.notebook.add(self.debt_tab, text="  Debt  ")
         self.notebook.add(self.spending_tab, text="  Spending  ")
         self.notebook.add(self.data_tab, text="  Insights  ")
         self.notebook.add(self.settings_tab_outer, text="  Settings  ")
@@ -259,6 +267,7 @@ class LedgerApp(tk.Tk):
         self.build_dashboard()
         self.build_cashflow()
         self.build_setup()
+        self.build_debt()
         self.build_spending()
         self.build_insights()
         self.build_settings()
@@ -459,13 +468,13 @@ class LedgerApp(tk.Tk):
         header = ttk.Frame(self.setup_tab)
         header.pack(fill="x", pady=(0, 14))
         ttk.Label(header, text="Setup", style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text="Set up the recurring pieces: income, shared-checking bills, credit cards, and loan payments.", style="Subtitle.TLabel").pack(side="left", padx=14, pady=7)
+        ttk.Label(header, text="Set up recurring income and monthly bills. Use the Debt tab for credit cards and loans.", style="Subtitle.TLabel").pack(side="left", padx=14, pady=7)
         guide = ttk.Frame(self.setup_tab, style="Card.TFrame", padding=(14, 10))
         guide.pack(fill="x", pady=(0, 14))
         ttk.Label(guide, text="HOW TO USE SETUP", style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(
             guide,
-            text="1) Income = paychecks.  2) Bills = monthly obligations; choose whether each leaves checking or is paid on a card.  3) Credit cards = cards with limits/room.  4) Loans = fixed debt payments from checking.",
+            text="1) Income = paychecks.  2) Bills = monthly obligations; choose whether each leaves checking or is paid on a card.  3) Debt tab = credit cards, available room, and personal loan payments.",
             style="Subtitle.TLabel",
             wraplength=1050,
             justify="left",
@@ -487,8 +496,25 @@ class LedgerApp(tk.Tk):
         self.income_tree.pack(fill="both", expand=True, pady=(10, 8))
         self.income_tree.bind("<Double-1>", lambda _: self.edit_income())
         self.action_buttons(income_frame, self.edit_income, self.delete_income)
-        card_frame = ttk.Frame(self.setup_tab, style="Card.TFrame", padding=14)
-        card_frame.pack(fill="x", pady=(14, 0))
+    def build_debt(self) -> None:
+        header = ttk.Frame(self.debt_tab)
+        header.pack(fill="x", pady=(0, 14))
+        ttk.Label(header, text="Debt", style="Title.TLabel").pack(side="left")
+        ttk.Label(header, text="Track the card you spend on, available room, and loan payoff payments from checking.", style="Subtitle.TLabel").pack(side="left", padx=14, pady=7)
+
+        guide = ttk.Frame(self.debt_tab, style="Card.TFrame", padding=(14, 10))
+        guide.pack(fill="x", pady=(0, 14))
+        ttk.Label(guide, text="HOW DEBT FITS CASHFLOW", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            guide,
+            text="Credit-card purchases affect card room now. The checking account only changes when you make the card payment. Personal loan payments are fixed checking outflows on their due date.",
+            style="Subtitle.TLabel",
+            wraplength=1050,
+            justify="left",
+        ).pack(anchor="w", pady=(6, 0))
+
+        card_frame = ttk.Frame(self.debt_tab, style="Card.TFrame", padding=14)
+        card_frame.pack(fill="x", pady=(0, 14))
         card_header = ttk.Frame(card_frame, style="Card.TFrame")
         card_header.pack(fill="x")
         ttk.Label(card_header, text="Credit cards / spending cards", style="CardTitle.TLabel").pack(side="left")
@@ -500,8 +526,8 @@ class LedgerApp(tk.Tk):
         self.cc_tree.bind("<Double-1>", lambda _: self.edit_card())
         ttk.Label(card_frame, text="Use this for the card you plan to spend on and pay back monthly. The app tracks balance pressure and available room.", style="Subtitle.TLabel").pack(anchor="w")
 
-        loan_frame = ttk.Frame(self.setup_tab, style="Card.TFrame", padding=14)
-        loan_frame.pack(fill="x", pady=(14, 0))
+        loan_frame = ttk.Frame(self.debt_tab, style="Card.TFrame", padding=14)
+        loan_frame.pack(fill="x")
         loan_header = ttk.Frame(loan_frame, style="Card.TFrame")
         loan_header.pack(fill="x")
         ttk.Label(loan_header, text="Loans / debt payoff", style="CardTitle.TLabel").pack(side="left")
@@ -690,6 +716,16 @@ class LedgerApp(tk.Tk):
             destination.write_bytes(response.read())
         return destination
 
+    def prepare_update_asset(self, path: Path, tag: str) -> Path:
+        if path.suffix.lower() != ".zip":
+            return path
+        extract_dir = self.update_download_dir() / f"PocketLedger-{tag}"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(path) as archive:
+            archive.extractall(extract_dir)
+        candidates = sorted(extract_dir.rglob("*.exe"), key=lambda item: (0 if item.name.lower() == "pocket ledger.exe" else 1, str(item)))
+        return candidates[0] if candidates else extract_dir
+
     def open_downloaded_update(self, path: Path):
         try:
             os.startfile(path)
@@ -719,14 +755,21 @@ class LedgerApp(tk.Tk):
                     f"Pocket Ledger {tag} is available.\n\nDownload {asset.get('name', 'the Windows update')} now?"
                 ):
                     path = self.download_update_asset(asset, tag)
-                    self.update_status_var.set(f"Downloaded {tag} to {path}")
-                    messagebox.showinfo(
-                        "Update downloaded",
-                        "The update was downloaded.\n\n"
-                        "Close Pocket Ledger, unzip/run the downloaded update, then reopen the app.\n\n"
-                        f"Saved to:\n{path}",
-                    )
-                    self.open_downloaded_update(path)
+                    prepared = self.prepare_update_asset(path, tag)
+                    self.update_status_var.set(f"Downloaded {tag} to {prepared}")
+                    if prepared.suffix.lower() == ".exe" and messagebox.askyesno(
+                        "Update ready",
+                        "The update was downloaded and prepared.\n\nLaunch the updated Pocket Ledger now? The current window will close."
+                    ):
+                        os.startfile(prepared)
+                        self.after(500, self.destroy)
+                    else:
+                        messagebox.showinfo(
+                            "Update ready",
+                            "The update was downloaded and prepared.\n\n"
+                            f"Saved to:\n{prepared}",
+                        )
+                        self.open_downloaded_update(prepared)
             else:
                 self.update_status_var.set(f"Pocket Ledger is up to date ({APP_VERSION}).")
                 if not silent:
