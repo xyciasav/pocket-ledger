@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.29"
+APP_VERSION = "0.2.30"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -563,7 +563,7 @@ class PocketLedgerQt(QMainWindow):
         layout.addLayout(self.cashflow_metric_grid)
         self.cashflow_summary.setObjectName("cardText")
         self.cashflow_summary.setWordWrap(True)
-        watch = self.card_frame("What to watch", self.cashflow_summary)
+        watch = self.compact_card_frame("What to watch", self.cashflow_summary)
         watch_layout = watch.layout()
         cash_button = QPushButton("Set starting cash")
         cash_button.setObjectName("primary")
@@ -609,7 +609,7 @@ class PocketLedgerQt(QMainWindow):
         guide.setObjectName("card")
         guide_layout = QVBoxLayout(guide)
         guide_layout.setContentsMargins(18, 16, 18, 18)
-        guide_title = QLabel("What goes here")
+        guide_title = QLabel("Cash Activity vs Spending")
         guide_title.setObjectName("sectionTitle")
         self.cash_activity_summary.setObjectName("cardText")
         self.cash_activity_summary.setWordWrap(True)
@@ -641,6 +641,13 @@ class PocketLedgerQt(QMainWindow):
         page, layout = self.shell("Spending", "Purchase tracking for cards and direct spending. This is for habits, limits, and insights.")
         self.spending_metric_grid.setSpacing(14)
         layout.addLayout(self.spending_metric_grid)
+        spending_help = QLabel(
+            "Use Spending for what you bought: Dutch Bros, groceries, gas, food, shopping, subscriptions, etc. "
+            "These rows feed Insights and AI analysis. They do not move checking cash by themselves unless you also enter the real checking movement on Cash Activity."
+        )
+        spending_help.setObjectName("cardText")
+        spending_help.setWordWrap(True)
+        layout.addWidget(self.compact_card_frame("What belongs here", spending_help))
         self.spending_table = self.table(("Date", "Account", "Description", "Category", "Amount", "Cashflow?"))
         layout.addWidget(self.entity_card("Purchase tracker", self.spending_table, self.add_spending, self.edit_spending, self.delete_spending))
         return page
@@ -816,6 +823,19 @@ class PocketLedgerQt(QMainWindow):
         label.setObjectName("sectionTitle")
         layout.addWidget(label)
         layout.addWidget(child, 1, alignment=Qt.AlignTop)
+        return frame
+
+    def compact_card_frame(self, title: str, child: QWidget) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("card")
+        frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setAlignment(Qt.AlignTop)
+        label = QLabel(title)
+        label.setObjectName("sectionTitle")
+        layout.addWidget(label)
+        layout.addWidget(child, alignment=Qt.AlignTop)
         return frame
 
     def entity_card(self, title: str, table: QTableWidget, add, edit, delete) -> QFrame:
@@ -1117,9 +1137,9 @@ class PocketLedgerQt(QMainWindow):
         for idx, metric in enumerate(metrics):
             self.cash_activity_metric_grid.addWidget(MetricCard(metric), 0, idx)
         self.cash_activity_summary.setText(
-            "Use this page only for real checking-account activity that is not already scheduled somewhere else. "
-            "Money in adds to cashflow. Money out subtracts from cashflow. Card payment subtracts from checking and links the payment to a card, "
-            "so card-paid bills do not also subtract individually from checking."
+            "Cash Activity is for real checking movement: money landed, cash withdrawn, checking spending, or a card payment leaving checking. "
+            "Spending is for what you bought and where money went: coffee, food, groceries, gas, shopping, etc. "
+            "Example: buying Dutch Bros on a credit card goes on Spending; paying that credit card from checking goes on Cash Activity."
         )
 
     def refresh_debt_summary(self, cards, loans) -> None:
@@ -1248,7 +1268,7 @@ class PocketLedgerQt(QMainWindow):
             Metric("Debt payments", money(debt_payment_total), "Card minimums plus loans/mortgages from the Debt page.", "blue"),
             Metric("Next due", money(next_due[2]) if next_due else "—", f"{next_due[0]:%b %d} · {next_due[1]} · {next_due[3]}" if next_due else "No upcoming bill or debt payment found.", "slate"),
         )
-        positions = ((0, 0, 1, 1), (0, 1, 1, 1), (0, 2, 1, 1), (1, 0, 1, 1), (1, 1, 1, 1), (1, 2, 1, 1), (2, 0, 1, 3))
+        positions = ((0, 0, 1, 1), (0, 1, 1, 1), (0, 2, 1, 1), (1, 0, 1, 1), (1, 1, 1, 1), (1, 2, 1, 1), (2, 0, 1, 1))
         for metric, position in zip(metrics, positions):
             self.setup_metric_grid.addWidget(MetricCard(metric), *position)
         next_income_text = f" Next income: {next_income[1]['name']} on {next_income[0]:%b %d} for {money(next_income[1]['amount'])}." if next_income else ""
