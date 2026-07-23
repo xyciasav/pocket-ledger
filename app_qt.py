@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.24"
+APP_VERSION = "0.2.25"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -1602,7 +1602,7 @@ class PocketLedgerQt(QMainWindow):
         cleaned = re.sub(r"(?is)<think>.*?</think>", "", text)
         cleaned = re.sub(r"(?is)<think>.*", "", cleaned)
         section_match = re.search(
-            r"(?im)^\s*(?:\*\*)?\s*(?:1[\).]|#*\s*1\.?)\s*(?:plain[- ]english\s+)?money snapshot",
+            r"(?im)^\s*(?:\*\*)?\s*(?:1[\).]|#*\s*1\.?)\s*(?:(?:plain[- ]english\s+)?money snapshot|bottom line)",
             cleaned,
         )
         if section_match:
@@ -1620,6 +1620,7 @@ class PocketLedgerQt(QMainWindow):
         end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
         by_category: dict[str, float] = {}
         by_account: dict[str, float] = {}
+        by_description: dict[str, float] = {}
         purchases = []
         checking = []
         for row in spending:
@@ -1628,6 +1629,7 @@ class PocketLedgerQt(QMainWindow):
                 amount = float(row["amount"] or 0)
                 by_category[row["category"]] = by_category.get(row["category"], 0) + amount
                 by_account[row["card_name"]] = by_account.get(row["card_name"], 0) + amount
+                by_description[row["description"]] = by_description.get(row["description"], 0) + amount
                 purchases.append({"date": row["spend_date"], "account": row["card_name"], "description": row["description"], "category": row["category"], "amount": amount})
         for row in transactions:
             d = self.parse_date(row["trans_date"])
@@ -1646,10 +1648,61 @@ class PocketLedgerQt(QMainWindow):
         low_cash = min([cash_today] + [float(row["running"] or 0) for row in timeline]) if timeline else cash_today
         next_income = next((row for row in timeline if float(row["amount"] or 0) > 0), None)
         next_outflow = next((row for row in timeline if float(row["amount"] or 0) < 0), None)
+        bill_total = sum(float(row["amount"] or 0) for row in bills for _d in self.dates_between(row["due_day"], start, end))
+        card_minimum_total = sum(float(row["minimum_payment"] or 0) for row in cards for _d in self.dates_between(row["due_day"], start, end))
+        loan_payment_total = sum(float(row["payment"] or 0) for row in loans for _d in self.dates_between(row["due_day"], start, end))
+        income_total = self.scheduled_income_between(income, start, end)
+        planned_obligations = bill_total + card_minimum_total + loan_payment_total
+        spending_total = sum(by_category.values())
+        month_days = calendar.monthrange(start.year, start.month)[1]
+        elapsed_days = max(1, min(today.day, month_days)) if today.year == start.year and today.month == start.month else month_days
+        projected_spending = spending_total / elapsed_days * month_days
+        history: dict[str, dict] = {}
+        for offset in range(0, 6):
+            month_value = start.month - offset
+            year_value = start.year + (month_value - 1) // 12
+            month_value = (month_value - 1) % 12 + 1
+            hist_start = date(year_value, month_value, 1)
+            hist_end = date(year_value, month_value, calendar.monthrange(year_value, month_value)[1])
+            key = hist_start.strftime("%Y-%m")
+            history[key] = {"total": 0.0, "by_category": {}, "by_description": {}}
+            for row in spending:
+                d = self.parse_date(row["spend_date"])
+                if hist_start <= d <= hist_end:
+                    amount = float(row["amount"] or 0)
+                    history[key]["total"] += amount
+                    history[key]["by_category"][row["category"]] = history[key]["by_category"].get(row["category"], 0) + amount
+                    history[key]["by_description"][row["description"]] = history[key]["by_description"].get(row["description"], 0) + amount
+        prior_months = [value for key, value in history.items() if key != start.strftime("%Y-%m")]
+        prior_category_average: dict[str, float] = {}
+        prior_description_average: dict[str, float] = {}
+        for source_name, target in (("by_category", prior_category_average), ("by_description", prior_description_average)):
+            names = sorted({name for month in prior_months for name in month[source_name].keys()})
+            for name in names:
+                target[name] = sum(month[source_name].get(name, 0) for month in prior_months) / max(1, len(prior_months))
+        category_changes = [
+            {"category": name, "current": value, "prior_month_average": prior_category_average.get(name, 0), "change": value - prior_category_average.get(name, 0)}
+            for name, value in by_category.items()
+        ]
+        description_changes = [
+            {"description": name, "current": value, "prior_month_average": prior_description_average.get(name, 0), "change": value - prior_description_average.get(name, 0)}
+            for name, value in by_description.items()
+        ]
         return {
             "month": f"{start:%B %Y}",
             "today": today.isoformat(),
             "cash_account": dict(cash),
+            "monthly_position": {
+                "planned_income": income_total,
+                "recurring_bills": bill_total,
+                "card_minimums": card_minimum_total,
+                "loan_mortgage_payments": loan_payment_total,
+                "planned_obligations_before_variable_spending": planned_obligations,
+                "income_after_planned_obligations": income_total - planned_obligations,
+                "tracked_spending_so_far": spending_total,
+                "projected_spending_at_current_pace": projected_spending,
+                "projected_month_end_after_obligations_and_spending": income_total - planned_obligations - projected_spending,
+            },
             "cash_math": {
                 "cash_today": cash_today,
                 "baseline_date": cash["start_date"],
@@ -1668,6 +1721,10 @@ class PocketLedgerQt(QMainWindow):
             },
             "spending_by_category": dict(sorted(by_category.items(), key=lambda item: item[1], reverse=True)),
             "spending_by_account": dict(sorted(by_account.items(), key=lambda item: item[1], reverse=True)),
+            "spending_by_description": dict(sorted(by_description.items(), key=lambda item: item[1], reverse=True)[:30]),
+            "spending_history_last_6_months": history,
+            "biggest_category_increases_vs_prior_average": sorted(category_changes, key=lambda row: row["change"], reverse=True)[:12],
+            "biggest_description_increases_vs_prior_average": sorted(description_changes, key=lambda row: row["change"], reverse=True)[:15],
             "top_purchases": sorted(purchases, key=lambda row: row["amount"], reverse=True)[:25],
             "checking_activity": sorted(checking, key=lambda row: row["amount"], reverse=True)[:25],
             "recurring_bills": [{"name": row["name"], "category": row["category"], "paid_from": row["paid_from"], "amount": float(row["amount"] or 0), "due_day": row["due_day"]} for row in bills],
@@ -1686,17 +1743,18 @@ class PocketLedgerQt(QMainWindow):
         summary = self.llm_month_summary()
         prompt = (
             "/no_think\n"
-            "You are a practical household budget analyst. Generate a full automatic rundown from the JSON ledger data. "
+            "You are a direct but supportive household budget coach. Analyze the JSON ledger data and tell the user what it means, not just what it contains. "
             "Do not ask follow-up questions. Use only the data provided and clearly say when something is an estimate. "
             "Do not output hidden reasoning, chain-of-thought, planning notes, self-correction, or <think> tags. "
-            "Only output the final report.\n\n"
+            "Only output the final report. Be specific, opinionated, and practical. If spending looks high, say so plainly. "
+            "Call out merchants/descriptions that are unusually high compared with prior months when the comparison data supports it.\n\n"
             "Report format:\n"
-            "1. Plain-English money snapshot: checking cash today, lowest forecast cash, next income, next outflow.\n"
-            "2. Current month spending breakdown: biggest categories, biggest purchases, account/card concentration.\n"
-            "3. Bills/debt pressure: recurring bills, card balances/room, loan or mortgage payments, high APR risks.\n"
-            "4. Forecast warnings: dates or periods that look tight, anything that could cause overdraft or maxed-card risk.\n"
-            "5. Recommended actions: 5 specific practical moves for the next 7-30 days.\n"
-            "6. Short summary sentence.\n\n"
+            "1. Bottom line: 2-4 sentences explaining whether the user is on track, overspending, tight on cashflow, or at card/debt risk.\n"
+            "2. Why: compare planned income versus bills, debt payments, and projected spending. Say if they are on pace to spend more than they make.\n"
+            "3. Spending callouts: list specific categories and descriptions/merchants that are high, repeated, or up versus prior-month averages. Mention examples like coffee/fast food only if present in the data.\n"
+            "4. Cashflow forecast: point out the tightest upcoming dates/paycheck windows, lowest cash, next income, next outflow, and any overdraft or credit-card-risk moments.\n"
+            "5. What to do next: 5 concrete actions for the next 7-30 days, including suggested caps or cuts by category/merchant when supported by data.\n"
+            "6. Encouraging summary: one short sentence that is honest but not doom-y.\n\n"
             f"Ledger JSON:\n{json.dumps(summary, indent=2)}"
         )
         self.llm_answer.setPlainText("Generating local AI rundown...")
