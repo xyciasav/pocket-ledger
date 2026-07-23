@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.7"
+APP_VERSION = "0.2.8"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -148,6 +148,7 @@ class Store:
             self.ensure_column(table, "ledger_id", "INTEGER NOT NULL DEFAULT 1")
         self.ensure_column("transactions", "account_id", "INTEGER")
         self.ensure_column("transactions", "related_card_id", "INTEGER")
+        self.ensure_column("loans", "extra_payment", "REAL NOT NULL DEFAULT 0")
         self.ensure_default_cash_account()
         self.conn.commit()
 
@@ -400,7 +401,8 @@ class PocketLedgerQt(QMainWindow):
         self.insight_source_bars = BarsWidget()
         self.insight_metric_grid = QGridLayout()
         self.insight_detail_table = None
-        self.insight_month = QDateEdit()
+        self.insight_month_start = date.today().replace(day=1)
+        self.insight_month_label = QLabel()
         self.cashflow_metric_grid = QGridLayout()
         self.cashflow_visual = TimelineWidget()
         self.cashflow_summary = QLabel()
@@ -508,6 +510,13 @@ class PocketLedgerQt(QMainWindow):
         self.account_label.setWordWrap(True)
         model_card = self.card_frame("Money model", self.account_label)
         layout.addWidget(model_card)
+        reset_row = QHBoxLayout()
+        set_cash = QPushButton("Set starting cash")
+        set_cash.setObjectName("primary")
+        set_cash.clicked.connect(self.set_starting_cash)
+        reset_row.addStretch()
+        reset_row.addWidget(set_cash)
+        layout.addLayout(reset_row)
         self.room_table = self.table(("Period", "Starting", "Income", "Due/planned", "After bills", "Safe", "Per day"))
         layout.addWidget(self.card_frame("Spending room", self.room_table))
         layout.addStretch()
@@ -519,7 +528,13 @@ class PocketLedgerQt(QMainWindow):
         layout.addLayout(self.cashflow_metric_grid)
         self.cashflow_summary.setObjectName("cardText")
         self.cashflow_summary.setWordWrap(True)
-        layout.addWidget(self.card_frame("What to watch", self.cashflow_summary))
+        watch = self.card_frame("What to watch", self.cashflow_summary)
+        watch_layout = watch.layout()
+        cash_button = QPushButton("Set starting cash")
+        cash_button.setObjectName("primary")
+        cash_button.clicked.connect(self.set_starting_cash)
+        watch_layout.addWidget(cash_button, alignment=Qt.AlignRight)
+        layout.addWidget(watch)
         layout.addWidget(self.card_frame("Next moves", self.cashflow_visual))
         self.cashflow_table = self.table(("Date", "Type", "Name", "Amount", "Running cash"))
         layout.addWidget(self.card_frame("Detailed timeline", self.cashflow_table))
@@ -538,15 +553,22 @@ class PocketLedgerQt(QMainWindow):
     def debt_page(self) -> QWidget:
         page, layout = self.shell("Debt", "Cards track available room. Loans track fixed payoff payments from checking.")
         self.cards_table = self.table(("Card", "Tracked balance", "Available", "Limit", "APR", "Payment", "Due"))
-        self.loans_table = self.table(("Loan", "Lender", "Balance", "APR", "Payment", "Due"))
+        self.loans_table = self.table(("Loan", "Lender", "Remaining", "Balance", "Extra paid", "APR", "Payment", "Due"))
         layout.addWidget(self.entity_card("Credit cards / spending cards", self.cards_table, self.add_card, self.edit_card, self.delete_card))
         layout.addWidget(self.entity_card("Loans / debt payoff", self.loans_table, self.add_loan, self.edit_loan, self.delete_loan))
         return page
 
     def cash_activity_page(self) -> QWidget:
-        page, layout = self.shell("Cash Activity", "Manual checking activity. These rows affect the cashflow forecast.")
+        page, layout = self.shell("Cash Activity", "One-off money in or out of checking: eBay income, rental income, cash pulls, manual spending, or card payments.")
+        explainer = QLabel(
+            "Use Extra Income for irregular money coming in, like eBay or side jobs. "
+            "Use the other categories for checking money going out. Credit Card Payment links a checking payment back to a card."
+        )
+        explainer.setObjectName("cardText")
+        explainer.setWordWrap(True)
+        layout.addWidget(self.card_frame("What belongs here", explainer))
         self.transactions_table = self.table(("Date", "Account", "Description", "Category", "Card paid", "Amount"))
-        layout.addWidget(self.entity_card("Checking / cashflow transactions", self.transactions_table, self.add_transaction, self.edit_transaction, self.delete_transaction))
+        layout.addWidget(self.entity_card("Checking money activity", self.transactions_table, self.add_transaction, self.edit_transaction, self.delete_transaction))
         return page
 
     def spending_page(self) -> QWidget:
@@ -567,17 +589,18 @@ class PocketLedgerQt(QMainWindow):
         label.setObjectName("sectionTitle")
         previous = QPushButton("Previous")
         next_month = QPushButton("Next")
-        self.insight_month.setDisplayFormat("MMMM yyyy")
-        self.insight_month.setCalendarPopup(True)
-        self.insight_month.setDate(date.today().replace(day=1))
-        self.insight_month.dateChanged.connect(lambda _value: self.refresh_all())
+        self.insight_month_label.setObjectName("monthPill")
+        self.update_insight_month_label()
         previous.clicked.connect(lambda: self.shift_insight_month(-1))
         next_month.clicked.connect(lambda: self.shift_insight_month(1))
+        current_month = QPushButton("This month")
+        current_month.clicked.connect(self.reset_insight_month)
         filter_row.addWidget(label)
         filter_row.addStretch()
         filter_row.addWidget(previous)
-        filter_row.addWidget(self.insight_month)
+        filter_row.addWidget(self.insight_month_label)
         filter_row.addWidget(next_month)
+        filter_row.addWidget(current_month)
         layout.addWidget(filter_card)
         self.insight_metric_grid.setSpacing(14)
         layout.addLayout(self.insight_metric_grid)
@@ -799,7 +822,7 @@ class PocketLedgerQt(QMainWindow):
         tracked = {card["id"]: float(card["balance"] or 0) + card_totals.get(card["id"], 0) - payments.get(card["id"], 0) for card in cards}
         card_debt = sum(tracked.values())
         card_room = sum(float(card["credit_limit"] or 0) - tracked.get(card["id"], 0) for card in cards)
-        loan_debt = sum(float(row["balance"] or 0) for row in loans)
+        loan_debt = sum(self.loan_remaining(row) for row in loans)
 
         for i in reversed(range(self.metric_grid.count())):
             widget = self.metric_grid.itemAt(i).widget()
@@ -824,7 +847,7 @@ class PocketLedgerQt(QMainWindow):
         self.set_table(self.bills_table, bills, lambda r: (r["name"], r["due_day"], r["category"], r["paid_from"], card_names.get(r["related_card_id"], "—"), money(r["amount"])))
         self.set_table(self.income_table, income, lambda r: (r["name"], r["frequency"], r["pay_day"] or "—", money(r["amount"])))
         self.set_table(self.cards_table, cards, lambda r: (r["name"], money(tracked.get(r["id"], 0)), money(float(r["credit_limit"] or 0)-tracked.get(r["id"], 0)), money(r["credit_limit"]), f"{r['apr']:.2f}%", money(r["minimum_payment"]), r["due_day"] or "—"))
-        self.set_table(self.loans_table, loans, lambda r: (r["name"], r["lender"], money(r["balance"]), f"{r['apr']:.2f}%", money(r["payment"]), r["due_day"] or "—"))
+        self.set_table(self.loans_table, loans, lambda r: (r["name"], r["lender"], money(self.loan_remaining(r)), money(r["balance"]), money(r["extra_payment"]), f"{r['apr']:.2f}%", money(r["payment"]), r["due_day"] or "—"))
         self.set_table(self.transactions_table, transactions, lambda r: (r["trans_date"], r["account_name"], r["description"], r["category"], r["related_card_name"] or "—", money(r["amount"])))
         self.set_table(self.spending_table, spending, lambda r: (r["spend_date"], r["card_name"], r["description"], r["category"], money(r["amount"]), "No"))
 
@@ -909,11 +932,27 @@ class PocketLedgerQt(QMainWindow):
         for idx, metric in enumerate(metrics):
             self.spending_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
 
+    def loan_remaining(self, loan) -> float:
+        return max(0.0, float(loan["balance"] or 0) - float(loan["extra_payment"] or 0))
+
+    def update_insight_month_label(self) -> None:
+        self.insight_month_label.setText(f"{self.insight_month_start:%B %Y}")
+
     def shift_insight_month(self, months: int) -> None:
-        self.insight_month.setDate(self.insight_month.date().addMonths(months))
+        month = self.insight_month_start.month + months
+        year = self.insight_month_start.year + (month - 1) // 12
+        month = (month - 1) % 12 + 1
+        self.insight_month_start = date(year, month, 1)
+        self.update_insight_month_label()
+        self.refresh_all()
+
+    def reset_insight_month(self) -> None:
+        self.insight_month_start = date.today().replace(day=1)
+        self.update_insight_month_label()
+        self.refresh_all()
 
     def refresh_insights(self, bills, cards, loans, transactions, spending) -> None:
-        start = self.insight_month.date().toPython().replace(day=1)
+        start = self.insight_month_start
         end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
         records = []
         for row in transactions:
@@ -1168,6 +1207,21 @@ class PocketLedgerQt(QMainWindow):
         QMessageBox.information(self, "Choose a ledger", "Choose Personal or a business ledger before adding or editing.")
         return False
 
+    def set_starting_cash(self) -> None:
+        cash = self.cash_account()
+        values = self.simple_dialog(
+            "Set starting cash",
+            [("name","text",()),("starting_balance","money",()),("start_date","date",()),("notes","text",())],
+            dict(cash),
+        )
+        if not values:
+            return
+        self.store.execute(
+            "UPDATE cash_accounts SET name=?,starting_balance=?,start_date=?,notes=? WHERE id=? AND ledger_id=?",
+            (values["name"], values["starting_balance"], values["start_date"], values["notes"], cash["id"], self.ledger_id),
+        )
+        self.refresh_all()
+
     def add_bill(self): self.bill_dialog()
     def edit_bill(self):
         row_id = self.selected_id(self.bills_table)
@@ -1219,10 +1273,10 @@ class PocketLedgerQt(QMainWindow):
         if row_id: self.loan_dialog(self.store.one("SELECT * FROM loans WHERE id=? AND ledger_id=?", (row_id, self.ledger_id)))
     def delete_loan(self): self.delete_selected("loans", self.loans_table)
     def loan_dialog(self, row=None):
-        values = self.simple_dialog("Loan", [("name","text",()),("lender","text",()),("balance","money",()),("apr","percent",()),("payment","money",()),("due_day","day",()),("notes","text",())], dict(row) if row else {})
+        values = self.simple_dialog("Loan", [("name","text",()),("lender","text",()),("balance","money",()),("extra_payment","money",()),("apr","percent",()),("payment","money",()),("due_day","day",()),("notes","text",())], dict(row) if row else {})
         if not values: return
-        if row: self.store.execute("UPDATE loans SET name=?,lender=?,balance=?,apr=?,payment=?,due_day=?,notes=? WHERE id=? AND ledger_id=?", (values["name"], values["lender"], values["balance"], values["apr"], values["payment"], values["due_day"], values["notes"], row["id"], self.ledger_id))
-        else: self.store.execute("INSERT INTO loans(name,lender,balance,apr,payment,due_day,notes,ledger_id) VALUES(?,?,?,?,?,?,?,?)", (values["name"], values["lender"], values["balance"], values["apr"], values["payment"], values["due_day"], values["notes"], self.ledger_id))
+        if row: self.store.execute("UPDATE loans SET name=?,lender=?,balance=?,extra_payment=?,apr=?,payment=?,due_day=?,notes=? WHERE id=? AND ledger_id=?", (values["name"], values["lender"], values["balance"], values["extra_payment"], values["apr"], values["payment"], values["due_day"], values["notes"], row["id"], self.ledger_id))
+        else: self.store.execute("INSERT INTO loans(name,lender,balance,extra_payment,apr,payment,due_day,notes,ledger_id) VALUES(?,?,?,?,?,?,?,?,?)", (values["name"], values["lender"], values["balance"], values["extra_payment"], values["apr"], values["payment"], values["due_day"], values["notes"], self.ledger_id))
         self.refresh_all()
 
     def add_transaction(self): self.transaction_dialog()
@@ -1332,6 +1386,10 @@ QPushButton#nav:hover, QPushButton#nav[active="true"] {
     background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px;
 }
 #sectionTitle { color: #0f172a; font: 700 13pt 'Segoe UI'; }
+#monthPill {
+    background: #dbeafe; color: #0f172a; border: 1px solid #bfdbfe;
+    border-radius: 12px; padding: 9px 18px; font: 700 11pt 'Segoe UI';
+}
 #eyebrow { color: #64748b; font: 700 8pt 'Segoe UI'; letter-spacing: 1px; }
 #metric_teal { color: #0f766e; font: 700 22pt 'Segoe UI'; }
 #metric_blue { color: #2563eb; font: 700 22pt 'Segoe UI'; }
