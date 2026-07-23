@@ -6,8 +6,14 @@ the same local SQLite database in ~/PocketLedger/budget.db.
 from __future__ import annotations
 
 import calendar
+import json
+import os
 import sqlite3
 import sys
+import urllib.error
+import urllib.request
+import webbrowser
+import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -42,7 +48,10 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
+DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
+RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
+RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
 APP_DIR = Path.home() / "PocketLedger"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = APP_DIR / "budget.db"
@@ -349,6 +358,7 @@ class PocketLedgerQt(QMainWindow):
         self.ledger_combo = QComboBox()
         self.tables: dict[str, QTableWidget] = {}
         self.insight_bars = BarsWidget()
+        self.update_status = QLabel("Not checked yet.")
         self._build()
         self.refresh_all()
 
@@ -369,6 +379,7 @@ class PocketLedgerQt(QMainWindow):
         self.add_page("Debt", self.debt_page())
         self.add_page("Spending", self.spending_page())
         self.add_page("Insights", self.insights_page())
+        self.add_page("Settings", self.settings_page())
 
     def sidebar(self) -> QWidget:
         side = QFrame()
@@ -390,7 +401,7 @@ class PocketLedgerQt(QMainWindow):
         self.ledger_combo.setObjectName("ledgerCombo")
         layout.addWidget(self.ledger_combo)
         layout.addSpacing(18)
-        for name in ("Overview", "Cashflow", "Bills + Income", "Debt", "Spending", "Insights"):
+        for name in ("Overview", "Cashflow", "Bills + Income", "Debt", "Spending", "Insights", "Settings"):
             button = QPushButton(name)
             button.setObjectName("nav")
             button.clicked.connect(lambda _checked=False, n=name: self.go(n))
@@ -493,6 +504,38 @@ class PocketLedgerQt(QMainWindow):
         self.insight_summary.setObjectName("cardText")
         layout.addWidget(self.card_frame("This month", self.insight_summary))
         layout.addWidget(self.card_frame("Category breakdown", self.insight_bars))
+        return page
+
+    def settings_page(self) -> QWidget:
+        page, layout = self.shell("Settings", "Updates, version info, and app-level utilities for the Qt preview.")
+        card = QFrame()
+        card.setObjectName("card")
+        body = QVBoxLayout(card)
+        body.setContentsMargins(18, 16, 18, 18)
+        title = QLabel("App updates")
+        title.setObjectName("sectionTitle")
+        current = QLabel(f"Current version: {APP_VERSION}")
+        current.setObjectName("cardText")
+        source = QLabel(f"Updates come from: {RELEASES_PAGE_URL}")
+        source.setObjectName("cardText")
+        source.setWordWrap(True)
+        self.update_status.setObjectName("cardText")
+        button_row = QHBoxLayout()
+        check = QPushButton("Check for updates")
+        check.setObjectName("primary")
+        check.clicked.connect(lambda: self.check_for_updates(False))
+        open_releases = QPushButton("Open releases")
+        open_releases.clicked.connect(lambda: webbrowser.open(RELEASES_PAGE_URL))
+        button_row.addWidget(check)
+        button_row.addWidget(open_releases)
+        button_row.addStretch()
+        body.addWidget(title)
+        body.addWidget(current)
+        body.addWidget(source)
+        body.addWidget(self.update_status)
+        body.addLayout(button_row)
+        layout.addWidget(card)
+        layout.addStretch()
         return page
 
     def card_frame(self, title: str, child: QWidget) -> QFrame:
@@ -829,6 +872,98 @@ class PocketLedgerQt(QMainWindow):
             income_at_start = float(source["amount"] or 0)
             period_start = payday
         return rows
+
+    def version_tuple(self, value: str) -> tuple[int, ...]:
+        parts = []
+        for piece in str(value).strip().lower().lstrip("v").replace("-", ".").split("."):
+            digits = "".join(ch for ch in piece if ch.isdigit())
+            if digits:
+                parts.append(int(digits))
+        return tuple(parts or [0])
+
+    def update_download_dir(self) -> Path:
+        downloads = Path.home() / "Downloads"
+        folder = downloads if downloads.exists() else APP_DIR / "Updates"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def pick_release_asset(self, release: dict) -> dict | None:
+        assets = release.get("assets") or []
+        scored = []
+        for asset in assets:
+            name = str(asset.get("name", "")).lower()
+            url = asset.get("browser_download_url")
+            if not url:
+                continue
+            score = 0
+            if "windows" in name or "win" in name:
+                score += 4
+            if name.endswith(".zip"):
+                score += 3
+            if "qt" in name:
+                score += 3
+            if "pocketledger" in name or "pocket-ledger" in name or "pocket ledger" in name:
+                score += 2
+            scored.append((score, asset))
+        if not scored:
+            return None
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return scored[0][1]
+
+    def download_update_asset(self, asset: dict, tag: str) -> Path:
+        raw_name = str(asset.get("name") or f"PocketLedger-{tag}-windows.zip")
+        safe_name = "".join(ch if ch.isalnum() or ch in "._- " else "_" for ch in raw_name).strip()
+        destination = self.update_download_dir() / (safe_name or f"PocketLedger-{tag}-windows.zip")
+        self.update_status.setText(f"Downloading {tag}...")
+        QApplication.processEvents()
+        request = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "PocketLedgerQt"})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            destination.write_bytes(response.read())
+        return destination
+
+    def prepare_update_asset(self, path: Path, tag: str) -> Path:
+        if path.suffix.lower() != ".zip":
+            return path
+        extract_dir = self.update_download_dir() / f"PocketLedger-{tag}"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(path) as archive:
+            archive.extractall(extract_dir)
+        candidates = sorted(extract_dir.rglob("*.exe"), key=lambda item: (0 if "qt" in item.name.lower() else 1, str(item)))
+        return candidates[0] if candidates else extract_dir
+
+    def check_for_updates(self, silent: bool = False) -> None:
+        try:
+            self.update_status.setText("Checking GitHub releases...")
+            QApplication.processEvents()
+            request = urllib.request.Request(RELEASES_API_URL, headers={"Accept": "application/vnd.github+json", "User-Agent": "PocketLedgerQt"})
+            with urllib.request.urlopen(request, timeout=10) as response:
+                release = json.loads(response.read().decode("utf-8"))
+            tag = str(release.get("tag_name", "")).strip()
+            if tag and self.version_tuple(tag) > self.version_tuple(APP_VERSION):
+                asset = self.pick_release_asset(release)
+                if not asset:
+                    self.update_status.setText(f"{tag} is available, but no Windows download was found.")
+                    return
+                if QMessageBox.question(self, "Update available", f"Pocket Ledger {tag} is available.\n\nDownload {asset.get('name', 'the Windows update')} now?") == QMessageBox.Yes:
+                    downloaded = self.download_update_asset(asset, tag)
+                    prepared = self.prepare_update_asset(downloaded, tag)
+                    self.update_status.setText(f"Update ready: {prepared}")
+                    if prepared.suffix.lower() == ".exe" and QMessageBox.question(self, "Update ready", "Launch the updated Pocket Ledger now? This window will close.") == QMessageBox.Yes:
+                        os.startfile(prepared)
+                        self.close()
+                    else:
+                        try:
+                            os.startfile(prepared)
+                        except OSError:
+                            webbrowser.open(RELEASES_PAGE_URL)
+            else:
+                self.update_status.setText(f"Pocket Ledger is up to date ({APP_VERSION}).")
+                if not silent:
+                    QMessageBox.information(self, "No update found", f"Pocket Ledger is up to date.\n\nCurrent version: {APP_VERSION}")
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError, OSError) as exc:
+            self.update_status.setText("Could not check for updates.")
+            if not silent:
+                QMessageBox.critical(self, "Update check failed", f"Could not check GitHub releases.\n\n{exc}")
 
     def simple_dialog(self, title: str, fields, initial=None) -> dict | None:
         if not self.require_single_ledger():
