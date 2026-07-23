@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.9"
+APP_VERSION = "0.2.10"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -407,6 +407,10 @@ class PocketLedgerQt(QMainWindow):
         self.cashflow_visual = TimelineWidget()
         self.cashflow_summary = QLabel()
         self.spending_metric_grid = QGridLayout()
+        self.setup_metric_grid = QGridLayout()
+        self.setup_summary = QLabel()
+        self.bill_breakdown_bars = BarsWidget()
+        self.income_breakdown_bars = BarsWidget()
         self.update_status = QLabel("Not checked yet.")
         self._build()
         self.refresh_all()
@@ -541,12 +545,21 @@ class PocketLedgerQt(QMainWindow):
         return page
 
     def setup_page(self) -> QWidget:
-        page, layout = self.shell("Bills + Income", "Recurring bills and paychecks. Debt lives on the Debt page.")
+        page, layout = self.shell("Bills + Income", "Plan the recurring money: paychecks, rent/mortgage, utilities, and card-paid bills.")
+        self.setup_metric_grid.setSpacing(14)
+        layout.addLayout(self.setup_metric_grid)
+        self.setup_summary.setObjectName("cardText")
+        self.setup_summary.setWordWrap(True)
+        layout.addWidget(self.card_frame("Monthly plan", self.setup_summary))
+        chart_row = QHBoxLayout()
+        chart_row.addWidget(self.card_frame("Bills by category", self.bill_breakdown_bars), 1)
+        chart_row.addWidget(self.card_frame("Income by source", self.income_breakdown_bars), 1)
+        layout.addLayout(chart_row)
         row = QHBoxLayout()
         self.bills_table = self.table(("Name", "Due", "Category", "Paid from", "Card", "Amount"))
         self.income_table = self.table(("Name", "Frequency", "Pay day", "Amount"))
-        row.addWidget(self.entity_card("Bills / monthly obligations", self.bills_table, self.add_bill, self.edit_bill, self.delete_bill), 3)
-        row.addWidget(self.entity_card("Income / paychecks", self.income_table, self.add_income, self.edit_income, self.delete_income), 2)
+        row.addWidget(self.entity_card("Recurring bills", self.bills_table, self.add_bill, self.edit_bill, self.delete_bill), 3)
+        row.addWidget(self.entity_card("Recurring income", self.income_table, self.add_income, self.edit_income, self.delete_income), 2)
         layout.addLayout(row)
         return page
 
@@ -838,6 +851,7 @@ class PocketLedgerQt(QMainWindow):
         card_names = {row["id"]: row["name"] for row in cards}
         self.set_table(self.bills_table, bills, lambda r: (r["name"], r["due_day"], r["category"], r["paid_from"], card_names.get(r["related_card_id"], "—"), money(r["amount"])))
         self.set_table(self.income_table, income, lambda r: (r["name"], r["frequency"], r["pay_day"] or "—", money(r["amount"])))
+        self.refresh_setup_summary(bills, income, today)
         self.set_table(self.cards_table, cards, lambda r: (r["name"], money(card_balances.get(r["id"], 0)), money(float(r["credit_limit"] or 0)-card_balances.get(r["id"], 0)), money(r["credit_limit"]), f"{r['apr']:.2f}%", money(r["minimum_payment"]), r["due_day"] or "—"))
         self.set_table(self.loans_table, loans, lambda r: (r["name"], r["lender"], money(self.loan_remaining(r)), money(r["balance"]), money(r["extra_payment"]), f"{r['apr']:.2f}%", money(r["payment"]), r["due_day"] or "—"))
         self.set_table(self.transactions_table, transactions, lambda r: (r["trans_date"], r["account_name"], r["description"], r["category"], r["related_card_name"] or "—", money(r["amount"])))
@@ -923,6 +937,57 @@ class PocketLedgerQt(QMainWindow):
         )
         for idx, metric in enumerate(metrics):
             self.spending_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
+
+    def refresh_setup_summary(self, bills, income, today: date) -> None:
+        start = today.replace(day=1)
+        end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
+        bill_total = sum(float(row["amount"] or 0) for row in bills for _d in self.dates_between(row["due_day"], start, end))
+        bank_total = sum(float(row["amount"] or 0) for row in bills if is_bank_paid(row["paid_from"]) for _d in self.dates_between(row["due_day"], start, end))
+        card_total = bill_total - bank_total
+        income_total = self.scheduled_income_between(income, start, end)
+        net = income_total - bill_total
+        by_category: dict[str, float] = {}
+        for row in bills:
+            amount = sum(float(row["amount"] or 0) for _d in self.dates_between(row["due_day"], start, end))
+            by_category[row["category"]] = by_category.get(row["category"], 0) + amount
+        by_income: dict[str, float] = {}
+        for row in income:
+            amount = sum(float(row["amount"] or 0) for _d in self.dates_between(row["pay_day"], start, end))
+            by_income[row["name"]] = by_income.get(row["name"], 0) + amount
+        upcoming_bills = sorted(
+            ((d, row) for row in bills for d in self.dates_between(row["due_day"], today, today + timedelta(days=45))),
+            key=lambda item: (item[0], item[1]["name"]),
+        )
+        upcoming_income = sorted(
+            ((d, row) for row in income for d in self.dates_between(row["pay_day"], today, today + timedelta(days=45))),
+            key=lambda item: (item[0], item[1]["name"]),
+        )
+        next_bill = upcoming_bills[0] if upcoming_bills else None
+        next_income = upcoming_income[0] if upcoming_income else None
+        for i in reversed(range(self.setup_metric_grid.count())):
+            widget = self.setup_metric_grid.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        metrics = (
+            Metric("Monthly income", money(income_total), f"{start:%B %Y} planned deposits.", "blue"),
+            Metric("Monthly bills", money(bill_total), "Recurring bills only; debt lives on Debt.", "slate"),
+            Metric("Income after bills", money(net), "Income minus recurring bills before debt/spending.", "teal" if net >= 0 else "slate"),
+            Metric("Bank-paid bills", money(bank_total), "ACH/manual bills that hit checking.", "slate"),
+            Metric("Card/elsewhere bills", money(card_total), "Bills paid outside checking, usually by card.", "blue"),
+            Metric("Next bill", money(next_bill[1]["amount"]) if next_bill else "—", f"{next_bill[0]:%b %d} · {next_bill[1]['name']}" if next_bill else "No upcoming bill found.", "slate"),
+        )
+        for idx, metric in enumerate(metrics):
+            self.setup_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
+        next_income_text = f" Next income: {next_income[1]['name']} on {next_income[0]:%b %d} for {money(next_income[1]['amount'])}." if next_income else ""
+        self.setup_summary.setText(
+            f"This page is for recurring money only. Bank-paid bills flow into Cashflow directly; card-paid bills are tracked as obligations but checking moves when you pay the card. "
+            f"For {start:%B}, recurring income is {money(income_total)} and recurring bills are {money(bill_total)}.{next_income_text}"
+        )
+        palette = ["#2563eb", "#0f766e", "#8b5cf6", "#f59e0b", "#06b6d4", "#ef4444", "#22c55e"]
+        bill_rows = sorted(by_category.items(), key=lambda item: item[1], reverse=True)
+        income_rows = sorted(by_income.items(), key=lambda item: item[1], reverse=True)
+        self.bill_breakdown_bars.set_rows([(name, value, palette[idx % len(palette)]) for idx, (name, value) in enumerate(bill_rows)])
+        self.income_breakdown_bars.set_rows([(name, value, palette[idx % len(palette)]) for idx, (name, value) in enumerate(income_rows)])
 
     def loan_remaining(self, loan) -> float:
         return max(0.0, float(loan["balance"] or 0) - float(loan["extra_payment"] or 0))
