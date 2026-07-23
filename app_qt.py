@@ -10,6 +10,7 @@ import csv
 import ipaddress
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -54,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.23"
+APP_VERSION = "0.2.24"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -1568,7 +1569,7 @@ class PocketLedgerQt(QMainWindow):
             return {
                 "model": model,
                 "messages": [
-                    {"role": "system", "content": "You are a practical budget analyst. Keep advice specific and grounded in the provided data."},
+                    {"role": "system", "content": "You are a practical budget analyst. Keep advice specific and grounded in the provided data. Do not include hidden reasoning, chain-of-thought, <think> tags, or analysis notes."},
                     {"role": "user", "content": prompt},
                 ],
                 "stream": False,
@@ -1578,7 +1579,7 @@ class PocketLedgerQt(QMainWindow):
         return {
             "model": model,
             "messages": [
-                {"role": "system", "content": "You are a practical budget analyst. Keep advice specific and grounded in the provided data."},
+                {"role": "system", "content": "You are a practical budget analyst. Keep advice specific and grounded in the provided data. Do not include hidden reasoning, chain-of-thought, <think> tags, or analysis notes."},
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.2,
@@ -1586,7 +1587,7 @@ class PocketLedgerQt(QMainWindow):
         }
 
     def llm_answer_from_response(self, data: dict) -> str:
-        return str(
+        raw = str(
             data.get("response")
             or data.get("message", {}).get("content")
             or (data.get("choices") or [{}])[0].get("message", {}).get("content")
@@ -1594,7 +1595,23 @@ class PocketLedgerQt(QMainWindow):
             or (data.get("results") or [{}])[0].get("text")
             or data.get("text")
             or json.dumps(data, indent=2)
-        ).strip()
+        )
+        return self.clean_llm_answer(raw)
+
+    def clean_llm_answer(self, text: str) -> str:
+        cleaned = re.sub(r"(?is)<think>.*?</think>", "", text)
+        cleaned = re.sub(r"(?is)<think>.*", "", cleaned)
+        section_match = re.search(
+            r"(?im)^\s*(?:\*\*)?\s*(?:1[\).]|#*\s*1\.?)\s*(?:plain[- ]english\s+)?money snapshot",
+            cleaned,
+        )
+        if section_match:
+            cleaned = cleaned[section_match.start():]
+        fallback_match = re.search(r"(?im)^\s*(?:\*\*)?\s*checking cash today", cleaned)
+        if not section_match and fallback_match:
+            cleaned = cleaned[fallback_match.start():]
+        cleaned = re.sub(r"(?im)^\s*(?:\[?output generation\]?|proceeds\.?|done\.?)\s*$", "", cleaned)
+        return cleaned.strip() or "The local model returned only hidden reasoning. Try again or switch to a non-thinking/instruct model."
 
     def llm_month_summary(self) -> dict:
         cash, bills, income, cards, loans, transactions, spending = self.rows()
@@ -1668,8 +1685,11 @@ class PocketLedgerQt(QMainWindow):
             return
         summary = self.llm_month_summary()
         prompt = (
+            "/no_think\n"
             "You are a practical household budget analyst. Generate a full automatic rundown from the JSON ledger data. "
-            "Do not ask follow-up questions. Use only the data provided and clearly say when something is an estimate.\n\n"
+            "Do not ask follow-up questions. Use only the data provided and clearly say when something is an estimate. "
+            "Do not output hidden reasoning, chain-of-thought, planning notes, self-correction, or <think> tags. "
+            "Only output the final report.\n\n"
             "Report format:\n"
             "1. Plain-English money snapshot: checking cash today, lowest forecast cash, next income, next outflow.\n"
             "2. Current month spending breakdown: biggest categories, biggest purchases, account/card concentration.\n"
