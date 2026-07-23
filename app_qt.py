@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.25"
+APP_VERSION = "0.2.26"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -424,12 +424,15 @@ class PocketLedgerQt(QMainWindow):
         self.insight_metric_grid = QGridLayout()
         self.insight_detail_table = None
         self.llm_answer = QTextEdit()
+        self.llm_status = QLabel("Ready to analyze your current ledger.")
         self.insight_month_start = date.today().replace(day=1)
         self.insight_month_label = QLabel()
         self.cashflow_metric_grid = QGridLayout()
         self.cashflow_visual = TimelineWidget()
         self.cashflow_summary = QLabel()
         self.spending_metric_grid = QGridLayout()
+        self.cash_activity_metric_grid = QGridLayout()
+        self.cash_activity_summary = QLabel()
         self.setup_metric_grid = QGridLayout()
         self.setup_summary = QLabel()
         self.bill_breakdown_bars = BarsWidget()
@@ -599,16 +602,39 @@ class PocketLedgerQt(QMainWindow):
         return page
 
     def cash_activity_page(self) -> QWidget:
-        page, layout = self.shell("Cash Activity", "One-off money in or out of checking: eBay income, rental income, cash pulls, manual spending, or card payments.")
-        explainer = QLabel(
-            "Use Extra Income for irregular money coming in, like eBay or side jobs. "
-            "Use the other categories for checking money going out. Credit Card Payment links a checking payment back to a card."
-        )
-        explainer.setObjectName("cardText")
-        explainer.setWordWrap(True)
-        layout.addWidget(self.card_frame("What belongs here", explainer))
+        page, layout = self.shell("Cash Activity", "Real checking-account activity that is not already handled by recurring bills, income, or loan schedules.")
+        self.cash_activity_metric_grid.setSpacing(14)
+        layout.addLayout(self.cash_activity_metric_grid)
+        guide = QFrame()
+        guide.setObjectName("card")
+        guide_layout = QVBoxLayout(guide)
+        guide_layout.setContentsMargins(18, 16, 18, 18)
+        guide_title = QLabel("What goes here")
+        guide_title.setObjectName("sectionTitle")
+        self.cash_activity_summary.setObjectName("cardText")
+        self.cash_activity_summary.setWordWrap(True)
+        action_row = QHBoxLayout()
+        money_in = QPushButton("+ Money in")
+        money_in.setObjectName("primary")
+        money_out = QPushButton("+ Money out")
+        card_payment = QPushButton("+ Card payment")
+        money_in.setToolTip("Use for one-off income like eBay, cash jobs, refunds, or rent that was not configured as recurring income.")
+        money_out.setToolTip("Use for checking spending or cash withdrawals that are not recurring bills.")
+        card_payment.setToolTip("Use when checking paid a credit card so the cashflow shows the money leaving once.")
+        money_in.clicked.connect(self.add_extra_income)
+        money_out.clicked.connect(self.add_money_out)
+        card_payment.clicked.connect(self.add_card_payment)
+        action_row.addWidget(money_in)
+        action_row.addWidget(money_out)
+        action_row.addWidget(card_payment)
+        action_row.addStretch()
+        guide_layout.addWidget(guide_title)
+        guide_layout.addWidget(self.cash_activity_summary)
+        guide_layout.addLayout(action_row)
+        layout.addWidget(guide)
         self.transactions_table = self.table(("Date", "Account", "Description", "Category", "Card paid", "Amount"))
-        layout.addWidget(self.entity_card("Checking money activity", self.transactions_table, self.add_transaction, self.edit_transaction, self.delete_transaction))
+        self.transactions_table.setMinimumHeight(420)
+        layout.addWidget(self.entity_card("Checking ledger entries", self.transactions_table, self.add_transaction, self.edit_transaction, self.delete_transaction))
         return page
 
     def spending_page(self) -> QWidget:
@@ -663,14 +689,18 @@ class PocketLedgerQt(QMainWindow):
         )
         llm_hint.setObjectName("cardText")
         llm_hint.setWordWrap(True)
+        self.llm_status.setObjectName("cardText")
+        self.llm_status.setWordWrap(True)
+        self.llm_answer.setObjectName("aiResult")
         self.llm_answer.setReadOnly(True)
-        self.llm_answer.setMinimumHeight(260)
-        self.llm_answer.setPlaceholderText("Click Generate AI rundown to analyze current spending, bills, debt, and forecast.")
+        self.llm_answer.setMinimumHeight(320)
+        self.llm_answer.setVisible(False)
         ask = QPushButton("Generate AI rundown")
         ask.setObjectName("primary")
         ask.clicked.connect(self.ask_local_llm)
         llm_layout.addWidget(llm_title)
         llm_layout.addWidget(llm_hint)
+        llm_layout.addWidget(self.llm_status)
         llm_layout.addWidget(ask, alignment=Qt.AlignRight)
         llm_layout.addWidget(self.llm_answer)
         layout.addWidget(llm_card)
@@ -976,6 +1006,7 @@ class PocketLedgerQt(QMainWindow):
         self.refresh_debt_summary(cards, loans)
         self.set_table(self.transactions_table, transactions, lambda r: (r["trans_date"], r["account_name"], r["description"], r["category"], r["related_card_name"] or "—", money(r["amount"])))
         self.set_table(self.spending_table, spending, lambda r: (r["spend_date"], r["card_name"], r["description"], r["category"], money(r["amount"]), "No"))
+        self.refresh_cash_activity_summary(transactions)
 
         timeline = self.upcoming_events(bills, income, cards, loans, transactions, cash_today, today + timedelta(days=1), today + timedelta(days=60))
         timeline.insert(0, {"id": 0, "date": today.isoformat(), "kind": "Today", "name": "Starting cash", "amount": 0, "running": cash_today})
@@ -1057,6 +1088,30 @@ class PocketLedgerQt(QMainWindow):
         )
         for idx, metric in enumerate(metrics):
             self.spending_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
+
+    def refresh_cash_activity_summary(self, transactions) -> None:
+        start = date.today().replace(day=1)
+        month_rows = [row for row in transactions if start <= self.parse_date(row["trans_date"]) <= date.today()]
+        money_in = sum(float(row["amount"] or 0) for row in month_rows if row["category"] == EXTRA_INCOME_CATEGORY)
+        card_payments = sum(float(row["amount"] or 0) for row in month_rows if row["category"] == "Credit Card Payment")
+        money_out = sum(float(row["amount"] or 0) for row in month_rows if row["category"] not in (EXTRA_INCOME_CATEGORY, "Credit Card Payment"))
+        for i in reversed(range(self.cash_activity_metric_grid.count())):
+            widget = self.cash_activity_metric_grid.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        metrics = (
+            Metric("Money in", money(money_in), "One-off deposits like eBay, cash jobs, refunds, or non-recurring rental income.", "teal"),
+            Metric("Money out", money(money_out), "Checking spending/cash pulls that should reduce cashflow.", "slate"),
+            Metric("Card payments", money(card_payments), "Checking payments to credit cards. Use this so bills paid by card are not double-counted.", "blue"),
+            Metric("Rows this month", str(len(month_rows)), "Manual checking entries counted this month.", "slate"),
+        )
+        for idx, metric in enumerate(metrics):
+            self.cash_activity_metric_grid.addWidget(MetricCard(metric), 0, idx)
+        self.cash_activity_summary.setText(
+            "Use this page only for real checking-account activity that is not already scheduled somewhere else. "
+            "Money in adds to cashflow. Money out subtracts from cashflow. Card payment subtracts from checking and links the payment to a card, "
+            "so card-paid bills do not also subtract individually from checking."
+        )
 
     def refresh_debt_summary(self, cards, loans) -> None:
         card_balance = sum(float(row["balance"] or 0) for row in cards)
@@ -1757,7 +1812,9 @@ class PocketLedgerQt(QMainWindow):
             "6. Encouraging summary: one short sentence that is honest but not doom-y.\n\n"
             f"Ledger JSON:\n{json.dumps(summary, indent=2)}"
         )
-        self.llm_answer.setPlainText("Generating local AI rundown...")
+        self.llm_status.setText("Generating a local AI budget rundown...")
+        self.llm_answer.setVisible(False)
+        self.llm_answer.clear()
         QApplication.processEvents()
         try:
             payload = json.dumps(self.llm_payload(endpoint, model, prompt)).encode("utf-8")
@@ -1768,6 +1825,8 @@ class PocketLedgerQt(QMainWindow):
             with urllib.request.urlopen(request, timeout=120) as response:
                 data = json.loads(response.read().decode("utf-8"))
             self.llm_answer.setPlainText(self.llm_answer_from_response(data))
+            self.llm_answer.setVisible(True)
+            self.llm_status.setText("AI rundown generated from your current ledger and forecast.")
         except urllib.error.HTTPError as exc:
             try:
                 body = exc.read().decode("utf-8", errors="replace")
@@ -1780,8 +1839,12 @@ class PocketLedgerQt(QMainWindow):
                 f"{body or 'No response body returned.'}\n\n"
                 "If this is 401 Unauthorized, add the server API key in Settings > Local LLM."
             )
+            self.llm_answer.setVisible(True)
+            self.llm_status.setText("The local AI request reached the server, but the server returned an error.")
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
             self.llm_answer.setPlainText(f"Could not reach the local LLM.\n\nCheck that Ollama/LM Studio/local model is running and Settings has the right endpoint/model.\n\nEndpoint tried: {endpoint}\n\n{exc}")
+            self.llm_answer.setVisible(True)
+            self.llm_status.setText("Could not reach the configured local AI endpoint.")
 
     def version_tuple(self, value: str) -> tuple[int, ...]:
         parts = []
@@ -1963,19 +2026,28 @@ class PocketLedgerQt(QMainWindow):
         self.refresh_all()
 
     def add_transaction(self): self.transaction_dialog()
+    def add_extra_income(self): self.transaction_dialog({"trans_date": date.today().isoformat(), "category": EXTRA_INCOME_CATEGORY, "description": "Extra income"})
+    def add_money_out(self): self.transaction_dialog({"trans_date": date.today().isoformat(), "category": "Other", "description": "Checking spending"})
+    def add_card_payment(self): self.transaction_dialog({"trans_date": date.today().isoformat(), "category": "Credit Card Payment", "description": "Credit card payment"})
     def edit_transaction(self):
         row_id = self.selected_id(self.transactions_table)
         if row_id: self.transaction_dialog(self.store.one("SELECT * FROM transactions WHERE id=? AND ledger_id=?", (row_id, self.ledger_id)))
     def delete_transaction(self): self.delete_selected("transactions", self.transactions_table)
     def transaction_dialog(self, row=None):
         cash = self.cash_account()
+        existing = bool(row and "id" in row.keys()) if hasattr(row, "keys") else False
         card_choices = [""] + [f"{r['id']} - {r['name']}" for r in self.store.rows("SELECT id,name FROM cards WHERE ledger_id=? ORDER BY name", (self.ledger_id,))]
         initial = dict(row) if row else {"trans_date": date.today().isoformat(), "category": "Other"}
-        values = self.simple_dialog("Checking transaction", [("trans_date","date",()),("description","text",()),("amount","money",()),("category","choice",SPENDING_CATEGORIES),("Credit card paid","choice",card_choices)], initial)
+        if initial.get("category") == "Credit Card Payment" and initial.get("related_card_id"):
+            card = self.store.one("SELECT name FROM cards WHERE id=?", (initial["related_card_id"],))
+            initial["Credit card paid"] = f"{initial['related_card_id']} - {card['name'] if card else 'Unknown'}"
+        elif initial.get("category") == "Credit Card Payment" and len(card_choices) > 1:
+            initial["Credit card paid"] = card_choices[1]
+        values = self.simple_dialog("Checking cash activity", [("trans_date","date",()),("description","text",()),("amount","money",()),("category","choice",SPENDING_CATEGORIES),("Credit card paid","choice",card_choices)], initial)
         if not values: return
         related = int(values["Credit card paid"].split(" - ", 1)[0]) if values["Credit card paid"] else None
         if values["category"] != "Credit Card Payment": related = None
-        if row: self.store.execute("UPDATE transactions SET trans_date=?,description=?,amount=?,category=?,related_card_id=? WHERE id=? AND ledger_id=?", (values["trans_date"], values["description"], values["amount"], values["category"], related, row["id"], self.ledger_id))
+        if existing: self.store.execute("UPDATE transactions SET trans_date=?,description=?,amount=?,category=?,related_card_id=? WHERE id=? AND ledger_id=?", (values["trans_date"], values["description"], values["amount"], values["category"], related, row["id"], self.ledger_id))
         else: self.store.execute("INSERT INTO transactions(trans_date,description,amount,category,related_card_id,source,account_id,ledger_id) VALUES(?,?,?,?,?,?,?,?)", (values["trans_date"], values["description"], values["amount"], values["category"], related, "Manual", cash["id"], self.ledger_id))
         self.refresh_all()
 
@@ -2023,6 +2095,11 @@ QLabel { color: #18243b; font: 10pt 'Segoe UI'; }
 QComboBox, QLineEdit, QDateEdit, QSpinBox, QDoubleSpinBox {
     background: #ffffff; color: #0f172a; selection-background-color: #bfdbfe;
     selection-color: #0f172a; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px;
+}
+QTextEdit#aiResult {
+    background: #f8fafc; color: #0f172a; border: 1px solid #dbeafe;
+    border-radius: 14px; padding: 14px; font: 10pt 'Segoe UI';
+    selection-background-color: #bfdbfe; selection-color: #0f172a;
 }
 QComboBox#ledgerCombo { background: #ffffff; color: #0f172a; min-height: 22px; }
 QComboBox QAbstractItemView {
