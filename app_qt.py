@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.14"
+APP_VERSION = "0.2.15"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -1002,7 +1002,8 @@ class PocketLedgerQt(QMainWindow):
             for d in self.dates_between(row["due_day"], today, today + timedelta(days=45)):
                 upcoming_debt.append((d, row["name"], float(row["payment"] or 0), "Loan / mortgage"))
         upcoming_due = sorted(
-            [(d, row["name"], float(row["amount"] or 0), "Bill") for d, row in upcoming_bills] + upcoming_debt,
+            [(d, row["name"], float(row["amount"] or 0), "Bill") for d, row in upcoming_bills if float(row["amount"] or 0) > 0]
+            + [row for row in upcoming_debt if row[2] > 0],
             key=lambda item: (item[0], item[1]),
         )
         next_bill = upcoming_bills[0] if upcoming_bills else None
@@ -1014,9 +1015,10 @@ class PocketLedgerQt(QMainWindow):
                 widget.setParent(None)
         metrics = (
             Metric("Monthly income", money(income_total), f"{start:%B %Y} planned deposits.", "blue"),
-            Metric("Bills + debt due", money(planned_outflow_total), "Recurring bills plus card minimums and loan/mortgage payments.", "slate"),
-            Metric("After bills + debt", money(net), "Income minus recurring bills and scheduled debt payments.", "teal" if net >= 0 else "slate"),
+            Metric("Bills + debt due", money(planned_outflow_total), "Bank-paid bills + card/elsewhere bills + Debt-page payments.", "slate"),
+            Metric("Variable spending left", money(net), "Left after recurring bills and scheduled debt; groceries/car/food/spending come from this.", "teal" if net >= 0 else "slate"),
             Metric("Bank-paid bills", money(bank_total), "ACH/manual bills that hit checking.", "slate"),
+            Metric("Card/elsewhere bills", money(card_total), "Bills tracked here but usually paid through a card or outside checking.", "blue"),
             Metric("Debt payments", money(debt_payment_total), "Card minimums plus loans/mortgages from the Debt page.", "blue"),
             Metric("Next due", money(next_due[2]) if next_due else "—", f"{next_due[0]:%b %d} · {next_due[1]} · {next_due[3]}" if next_due else "No upcoming bill or debt payment found.", "slate"),
         )
@@ -1026,7 +1028,8 @@ class PocketLedgerQt(QMainWindow):
         self.setup_summary.setText(
             f"This page is for recurring money and scheduled debt payments. Bank-paid bills and Debt-page payments flow into Cashflow; card-paid bills are tracked as obligations but checking moves when you pay the card. "
             f"For {start:%B}, recurring income is {money(income_total)}, recurring bills are {money(bill_total)}, and Debt-page payments are {money(debt_payment_total)}. "
-            f"After bills plus debt payments: {money(net)}.{next_income_text}"
+            f"Formula: {money(bank_total)} bank-paid bills + {money(card_total)} card/elsewhere bills + {money(debt_payment_total)} debt payments = {money(planned_outflow_total)} due. "
+            f"Variable spending left after those planned obligations: {money(net)}.{next_income_text}"
         )
         palette = ["#2563eb", "#0f766e", "#8b5cf6", "#f59e0b", "#06b6d4", "#ef4444", "#22c55e"]
         bill_rows = sorted(by_category.items(), key=lambda item: item[1], reverse=True)
