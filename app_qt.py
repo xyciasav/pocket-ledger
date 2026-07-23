@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.26"
+APP_VERSION = "0.2.27"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -983,17 +983,18 @@ class PocketLedgerQt(QMainWindow):
             if widget:
                 widget.setParent(None)
         metrics = (
-            Metric("Checking today", money(cash_today), "Cash after baseline, landed income, checking outflows, and manual spending.", "teal"),
+            Metric("Checking today", money(cash_today), f"Starts from your {cash['start_date']} cash reset, then applies activity after that date.", "teal"),
             Metric("Card debt / room", f"{money(card_debt)} / {money(card_room)}", "Current card balances and available room. Spending rows are for tracking, not debt math.", "blue"),
             Metric("Loans balance", money(loan_debt), "Mortgages, personal loans, and other fixed payoff balances.", "slate"),
-            Metric("Income after baseline", money(income_received), "Only counted after its pay date.", "blue"),
-            Metric("Due from checking", money(due_outflow), "ACH bills, card minimums, and loan payments.", "slate"),
-            Metric("Checking spending", money(actual_spending), "Manual checking outflows since baseline.", "slate"),
+            Metric("Income since cash reset", money(income_received), f"Scheduled income dated after {cash['start_date']} through today.", "blue"),
+            Metric("Checking bills since reset", money(due_outflow), "ACH/manual bills, card minimums, and loan payments dated after the cash reset through today.", "slate"),
+            Metric("Manual spending since reset", money(actual_spending), "Cash Activity outflows dated after the cash reset through today.", "slate"),
         )
         for idx, metric in enumerate(metrics):
             self.metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
         self.account_label.setText(
             f"{cash['name']} baseline: {money(cash['starting_balance'])} as of {cash['start_date']}. "
+            "If you reset starting cash today, the since-reset cards can show $0 until income, bills, payments, or Cash Activity rows happen after that date. "
             "Card balances are set on the Debt page; purchase rows are for tracking and insights. "
             "Loan payments are scheduled checking outflows."
         )
