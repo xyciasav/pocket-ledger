@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -178,15 +178,19 @@ class Store:
 
     def active_ledger_id(self) -> int:
         try:
-            ledger_id = int(self.setting("active_ledger_id", "0"))
+            ledger_id = int(self.setting("active_ledger_id", "1"))
         except ValueError:
-            ledger_id = 0
-        if ledger_id == 0:
-            return 0
+            ledger_id = 1
         if not self.one("SELECT id FROM ledgers WHERE id=?", (ledger_id,)):
-            return 0
+            ledger_id = 1
         active_count = self.ledger_activity_count(ledger_id)
-        biggest = self.conn.execute(
+        biggest = self.biggest_ledger()
+        if biggest and biggest["ledger_id"] != ledger_id and active_count <= 1 and biggest["total"] > active_count:
+            return int(biggest["ledger_id"])
+        return ledger_id
+
+    def biggest_ledger(self):
+        return self.conn.execute(
             """
             SELECT ledger_id,SUM(c) total FROM (
                 SELECT ledger_id,COUNT(*) c FROM bills GROUP BY ledger_id
@@ -198,9 +202,6 @@ class Store:
             ) GROUP BY ledger_id ORDER BY total DESC LIMIT 1
             """
         ).fetchone()
-        if biggest and biggest["ledger_id"] != ledger_id and active_count <= 1 and biggest["total"] > active_count:
-            return 0
-        return ledger_id
 
     def ledger_activity_count(self, ledger_id: int) -> int:
         total = 0
@@ -358,6 +359,9 @@ class PocketLedgerQt(QMainWindow):
         self.ledger_combo = QComboBox()
         self.tables: dict[str, QTableWidget] = {}
         self.insight_bars = BarsWidget()
+        self.insight_source_bars = BarsWidget()
+        self.insight_metric_grid = QGridLayout()
+        self.insight_detail_table = None
         self.update_status = QLabel("Not checked yet.")
         self._build()
         self.refresh_all()
@@ -500,10 +504,15 @@ class PocketLedgerQt(QMainWindow):
 
     def insights_page(self) -> QWidget:
         page, layout = self.shell("Insights", "Visual breakdown of spending, bills, cards, and debt payments.")
-        self.insight_summary = QLabel()
-        self.insight_summary.setObjectName("cardText")
-        layout.addWidget(self.card_frame("This month", self.insight_summary))
-        layout.addWidget(self.card_frame("Category breakdown", self.insight_bars))
+        self.insight_metric_grid.setSpacing(14)
+        layout.addLayout(self.insight_metric_grid)
+        chart_row = QHBoxLayout()
+        chart_row.addWidget(self.card_frame("Category breakdown", self.insight_bars), 1)
+        chart_row.addWidget(self.card_frame("Where it came from", self.insight_source_bars), 1)
+        layout.addLayout(chart_row)
+        self.insight_detail_table = self.table(("Description", "Category", "Source", "Total", "Count"))
+        self.insight_detail_table.setMinimumHeight(320)
+        layout.addWidget(self.card_frame("Top descriptions", self.insight_detail_table))
         return page
 
     def settings_page(self) -> QWidget:
@@ -609,7 +618,6 @@ class PocketLedgerQt(QMainWindow):
         current = self.ledger_id
         self.ledger_combo.blockSignals(True)
         self.ledger_combo.clear()
-        self.ledger_combo.addItem("All ledgers", 0)
         for row in self.store.rows("SELECT * FROM ledgers ORDER BY id"):
             self.ledger_combo.addItem(f"{row['id']} - {row['name']}", row["id"])
         index = self.ledger_combo.findData(current)
@@ -621,10 +629,6 @@ class PocketLedgerQt(QMainWindow):
         if ledger_id:
             self.ledger_id = int(ledger_id)
             self.store.set_setting("active_ledger_id", str(self.ledger_id))
-            self.refresh_all()
-        elif ledger_id == 0:
-            self.ledger_id = 0
-            self.store.set_setting("active_ledger_id", "0")
             self.refresh_all()
 
     def cash_account(self):
@@ -758,29 +762,63 @@ class PocketLedgerQt(QMainWindow):
     def refresh_insights(self, bills, cards, loans, transactions, spending) -> None:
         start = date.today().replace(day=1)
         end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
-        grouped: dict[str, float] = {}
+        records = []
         for row in transactions:
             d = self.parse_date(row["trans_date"])
             if start <= d <= end and row["category"] != EXTRA_INCOME_CATEGORY:
-                grouped[row["category"]] = grouped.get(row["category"], 0) + float(row["amount"] or 0)
+                records.append({"category": row["category"], "description": row["description"], "source": "Checking", "amount": float(row["amount"] or 0)})
         for row in spending:
             d = self.parse_date(row["spend_date"])
             if start <= d <= end:
-                grouped[row["category"]] = grouped.get(row["category"], 0) + float(row["amount"] or 0)
+                records.append({"category": row["category"], "description": row["description"], "source": f"Card: {row['card_name']}", "amount": float(row["amount"] or 0)})
         for bill in bills:
             for _d in self.dates_between(bill["due_day"], start, end):
-                grouped[bill["category"]] = grouped.get(bill["category"], 0) + float(bill["amount"] or 0)
+                source = "Bill from checking" if is_bank_paid(bill["paid_from"]) else "Bill on card"
+                records.append({"category": bill["category"], "description": bill["name"], "source": source, "amount": float(bill["amount"] or 0)})
         for card in cards:
             for _d in self.dates_between(card["due_day"], start, end):
-                grouped["Card minimums"] = grouped.get("Card minimums", 0) + float(card["minimum_payment"] or 0)
+                records.append({"category": "Debt", "description": card["name"], "source": "Card minimum", "amount": float(card["minimum_payment"] or 0)})
         for loan in loans:
             for _d in self.dates_between(loan["due_day"], start, end):
-                grouped["Loan payments"] = grouped.get("Loan payments", 0) + float(loan["payment"] or 0)
-        rows = sorted(grouped.items(), key=lambda item: item[1], reverse=True)
-        total = sum(value for _name, value in rows)
-        self.insight_summary.setText(f"{date.today():%B %Y}: {money(total)} across {len(rows)} categories.")
+                records.append({"category": "Debt", "description": loan["name"], "source": "Loan payment", "amount": float(loan["payment"] or 0)})
+
+        by_category: dict[str, float] = {}
+        by_source: dict[str, float] = {}
+        details: dict[tuple[str, str, str], dict] = {}
+        for row in records:
+            by_category[row["category"]] = by_category.get(row["category"], 0) + row["amount"]
+            by_source[row["source"]] = by_source.get(row["source"], 0) + row["amount"]
+            key = (row["description"], row["category"], row["source"])
+            details.setdefault(key, {"id": len(details) + 1, "description": row["description"], "category": row["category"], "source": row["source"], "total": 0.0, "count": 0})
+            details[key]["total"] += row["amount"]
+            details[key]["count"] += 1
+
+        category_rows = sorted(by_category.items(), key=lambda item: item[1], reverse=True)
+        source_rows = sorted(by_source.items(), key=lambda item: item[1], reverse=True)
+        detail_rows = sorted(details.values(), key=lambda item: item["total"], reverse=True)
+        total = sum(value for _name, value in category_rows)
+        count = len(records)
+        top_category = category_rows[0][0] if category_rows else "—"
+        avg = total / count if count else 0
+
+        for i in reversed(range(self.insight_metric_grid.count())):
+            widget = self.insight_metric_grid.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        metrics = (
+            Metric("Month total", money(total), f"{date.today():%B %Y}", "blue"),
+            Metric("Items counted", str(count), "Transactions, scheduled bills, and debt payments.", "slate"),
+            Metric("Top category", top_category, "Largest category in this view.", "teal"),
+            Metric("Average item", money(avg), "Average across counted records.", "slate"),
+        )
+        for idx, metric in enumerate(metrics):
+            self.insight_metric_grid.addWidget(MetricCard(metric), 0, idx)
+
         palette = ["#2563eb", "#0f766e", "#8b5cf6", "#f59e0b", "#06b6d4", "#ef4444", "#22c55e"]
-        self.insight_bars.set_rows([(name, value, palette[idx % len(palette)]) for idx, (name, value) in enumerate(rows)])
+        self.insight_bars.set_rows([(name, value, palette[idx % len(palette)]) for idx, (name, value) in enumerate(category_rows)])
+        self.insight_source_bars.set_rows([(name, value, palette[idx % len(palette)]) for idx, (name, value) in enumerate(source_rows)])
+        if self.insight_detail_table:
+            self.set_table(self.insight_detail_table, detail_rows[:20], lambda r: (r["description"], r["category"], r["source"], money(r["total"]), r["count"]))
 
     def parse_date(self, value: str | None) -> date:
         try:
@@ -974,7 +1012,7 @@ class PocketLedgerQt(QMainWindow):
     def require_single_ledger(self) -> bool:
         if self.ledger_id != 0:
             return True
-        QMessageBox.information(self, "Choose a ledger", "All ledgers is a read-only overview. Choose Personal or a business ledger before adding or editing.")
+        QMessageBox.information(self, "Choose a ledger", "Choose Personal or a business ledger before adding or editing.")
         return False
 
     def add_bill(self): self.bill_dialog()
@@ -1139,7 +1177,7 @@ QTableWidget::item { color: #0f172a; padding: 8px; }
 QHeaderView::section {
     background: #e2e8f0; color: #334155; padding: 8px; border: none; font-weight: 700;
 }
-QTableWidget::item:selected { background: #bfdbfe; color: #0f172a; }
+QTableWidget::item:selected { background: #e0f2fe; color: #0f172a; }
 """
 
 
