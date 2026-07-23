@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.16"
+APP_VERSION = "0.2.17"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -570,12 +570,6 @@ class PocketLedgerQt(QMainWindow):
         chart_row.addWidget(self.card_frame("Bills by category", self.bill_breakdown_bars), 1)
         chart_row.addWidget(self.card_frame("Income by source", self.income_breakdown_bars), 1)
         layout.addLayout(chart_row)
-        row = QHBoxLayout()
-        self.bills_table = self.table(("Name", "Due", "Category", "Paid from", "Card", "Amount"))
-        self.income_table = self.table(("Name", "Frequency", "Pay day", "Amount"))
-        row.addWidget(self.entity_card("Recurring bills", self.bills_table, self.add_bill, self.edit_bill, self.delete_bill), 3)
-        row.addWidget(self.entity_card("Recurring income", self.income_table, self.add_income, self.edit_income, self.delete_income), 2)
-        layout.addLayout(row)
         return page
 
     def debt_page(self) -> QWidget:
@@ -589,10 +583,6 @@ class PocketLedgerQt(QMainWindow):
         chart_row.addWidget(self.card_frame("Credit card room", self.card_debt_bars), 1)
         chart_row.addWidget(self.card_frame("Loans / mortgages", self.loan_debt_bars), 1)
         layout.addLayout(chart_row)
-        self.cards_table = self.table(("Card", "Current balance", "Available", "Limit", "APR", "Payment", "Due"))
-        self.loans_table = self.table(("Loan", "Lender", "Remaining", "Balance", "Extra paid", "APR", "Payment", "Due"))
-        layout.addWidget(self.entity_card("Credit cards / spending cards", self.cards_table, self.add_card, self.edit_card, self.delete_card))
-        layout.addWidget(self.entity_card("Loans / debt payoff", self.loans_table, self.add_loan, self.edit_loan, self.delete_loan))
         return page
 
     def cash_activity_page(self) -> QWidget:
@@ -679,6 +669,22 @@ class PocketLedgerQt(QMainWindow):
         body.addWidget(self.update_status)
         body.addLayout(button_row)
         layout.addWidget(card)
+        setup_note = QLabel("Configure the recurring structure here. The main tabs use this data for dashboards, cashflow, and insights.")
+        setup_note.setObjectName("cardText")
+        setup_note.setWordWrap(True)
+        layout.addWidget(self.card_frame("Setup data", setup_note))
+        recurring_row = QHBoxLayout()
+        self.bills_table = self.table(("Name", "Due", "Category", "Paid from", "Card", "Amount"))
+        self.income_table = self.table(("Name", "Frequency", "Pay day", "Amount"))
+        recurring_row.addWidget(self.entity_card("Recurring bills", self.bills_table, self.add_bill, self.edit_bill, self.delete_bill), 3)
+        recurring_row.addWidget(self.entity_card("Recurring income", self.income_table, self.add_income, self.edit_income, self.delete_income), 2)
+        layout.addLayout(recurring_row)
+        debt_row = QHBoxLayout()
+        self.cards_table = self.table(("Card", "Current balance", "Available", "Limit", "APR", "Payment", "Due"))
+        self.loans_table = self.table(("Loan", "Lender", "Remaining", "Balance", "Extra paid", "APR", "Payment", "Due"))
+        debt_row.addWidget(self.entity_card("Credit cards / spending cards", self.cards_table, self.add_card, self.edit_card, self.delete_card), 1)
+        debt_row.addWidget(self.entity_card("Loans / mortgages", self.loans_table, self.add_loan, self.edit_loan, self.delete_loan), 1)
+        layout.addLayout(debt_row)
         layout.addStretch()
         return page
 
@@ -1152,10 +1158,16 @@ class PocketLedgerQt(QMainWindow):
 
         by_category: dict[str, float] = {}
         by_source: dict[str, float] = {}
+        category_children: dict[str, dict[str, float]] = {}
+        source_children: dict[str, dict[str, float]] = {}
         details: dict[tuple[str, str, str], dict] = {}
         for row in records:
             by_category[row["category"]] = by_category.get(row["category"], 0) + row["amount"]
             by_source[row["source"]] = by_source.get(row["source"], 0) + row["amount"]
+            category_children.setdefault(row["category"], {})
+            category_children[row["category"]][row["description"]] = category_children[row["category"]].get(row["description"], 0) + row["amount"]
+            source_children.setdefault(row["source"], {})
+            source_children[row["source"]][row["description"]] = source_children[row["source"]].get(row["description"], 0) + row["amount"]
             key = (row["description"], row["category"], row["source"])
             details.setdefault(key, {"id": len(details) + 1, "description": row["description"], "category": row["category"], "source": row["source"], "total": 0.0, "count": 0})
             details[key]["total"] += row["amount"]
@@ -1183,8 +1195,24 @@ class PocketLedgerQt(QMainWindow):
             self.insight_metric_grid.addWidget(MetricCard(metric), 0, idx)
 
         palette = ["#2563eb", "#0f766e", "#8b5cf6", "#f59e0b", "#06b6d4", "#ef4444", "#22c55e"]
-        self.insight_bars.set_rows([(name, value, palette[idx % len(palette)]) for idx, (name, value) in enumerate(category_rows)])
-        self.insight_source_bars.set_rows([(name, value, palette[idx % len(palette)]) for idx, (name, value) in enumerate(source_rows)])
+        self.insight_bars.set_rows([
+            (
+                name,
+                value,
+                palette[idx % len(palette)],
+                sorted(category_children.get(name, {}).items(), key=lambda child: child[1], reverse=True),
+            )
+            for idx, (name, value) in enumerate(category_rows)
+        ])
+        self.insight_source_bars.set_rows([
+            (
+                name,
+                value,
+                palette[idx % len(palette)],
+                sorted(source_children.get(name, {}).items(), key=lambda child: child[1], reverse=True),
+            )
+            for idx, (name, value) in enumerate(source_rows)
+        ])
         if self.insight_detail_table:
             self.set_table(self.insight_detail_table, detail_rows[:20], lambda r: (r["description"], r["category"], r["source"], money(r["total"]), r["count"]))
 
