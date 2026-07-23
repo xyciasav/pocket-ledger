@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import calendar
 import csv
+import ipaddress
 import json
 import os
 import shutil
 import sqlite3
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 import zipfile
@@ -52,7 +54,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.20"
+APP_VERSION = "0.2.21"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -738,7 +740,8 @@ class PocketLedgerQt(QMainWindow):
         llm_settings_title = QLabel("Local LLM")
         llm_settings_title.setObjectName("sectionTitle")
         llm_settings_text = QLabel(
-            "Insights can ask a local model for spending notes. Default endpoint is Ollama: http://127.0.0.1:11434/api/generate"
+            "Insights can ask a local model for spending notes. Use Ollama /api/generate or LM Studio/OpenAI-compatible /v1/chat/completions. "
+            "Private LAN addresses like http://10.0.0.156:1234 are allowed and will auto-fill the chat endpoint."
         )
         llm_settings_text.setObjectName("cardText")
         llm_settings_text.setWordWrap(True)
@@ -1500,12 +1503,39 @@ class PocketLedgerQt(QMainWindow):
         values = dialog.values() if dialog.exec() == QDialog.Accepted else None
         if not values:
             return
-        endpoint = str(values["llm_endpoint"]).strip()
-        if not (endpoint.startswith("http://127.0.0.1") or endpoint.startswith("http://localhost")):
-            QMessageBox.warning(self, "Local only", "For now, Pocket Ledger only allows localhost LLM endpoints so your budget data stays on this computer.")
+        endpoint = self.normalize_llm_endpoint(str(values["llm_endpoint"]).strip())
+        if not self.is_allowed_llm_endpoint(endpoint):
+            QMessageBox.warning(self, "Local/private only", "Pocket Ledger only allows localhost or private LAN LLM endpoints so your budget data stays local.")
             return
         self.store.set_setting("llm_endpoint", endpoint)
         self.store.set_setting("llm_model", str(values["llm_model"]).strip() or "llama3.1")
+
+    def normalize_llm_endpoint(self, endpoint: str) -> str:
+        if not endpoint:
+            return "http://127.0.0.1:11434/api/generate"
+        if "://" not in endpoint:
+            endpoint = f"http://{endpoint}"
+        parsed = urllib.parse.urlparse(endpoint)
+        if parsed.path in ("", "/"):
+            path = "/api/generate" if parsed.port == 11434 else "/v1/chat/completions"
+            parsed = parsed._replace(path=path)
+        return urllib.parse.urlunparse(parsed)
+
+    def is_allowed_llm_endpoint(self, endpoint: str) -> bool:
+        try:
+            parsed = urllib.parse.urlparse(endpoint)
+            if parsed.scheme not in ("http", "https"):
+                return False
+            host = parsed.hostname or ""
+            if host.lower() == "localhost":
+                return True
+            address = ipaddress.ip_address(host)
+            return address.is_loopback or address.is_private
+        except ValueError:
+            return False
+
+    def is_ollama_endpoint(self, endpoint: str) -> bool:
+        return urllib.parse.urlparse(endpoint).path.rstrip("/") == "/api/generate"
 
     def llm_month_summary(self) -> dict:
         cash, bills, income, cards, loans, transactions, spending = self.rows()
@@ -1538,10 +1568,10 @@ class PocketLedgerQt(QMainWindow):
         }
 
     def ask_local_llm(self) -> None:
-        endpoint = self.store.setting("llm_endpoint", "http://127.0.0.1:11434/api/generate")
+        endpoint = self.normalize_llm_endpoint(self.store.setting("llm_endpoint", "http://127.0.0.1:11434/api/generate"))
         model = self.store.setting("llm_model", "llama3.1")
-        if not (endpoint.startswith("http://127.0.0.1") or endpoint.startswith("http://localhost")):
-            QMessageBox.warning(self, "Local only", "The configured LLM endpoint is not localhost. Open Settings and use a local endpoint first.")
+        if not self.is_allowed_llm_endpoint(endpoint):
+            QMessageBox.warning(self, "Local/private only", "The configured LLM endpoint is not localhost or a private LAN address. Open Settings and use a local/private endpoint first.")
             return
         question = self.llm_prompt.toPlainText().strip() or "Analyze this month's spending and tell me what stands out, what risks I should watch, and 3 practical budget tips."
         prompt = (
@@ -1552,14 +1582,32 @@ class PocketLedgerQt(QMainWindow):
         self.llm_answer.setPlainText("Asking local LLM...")
         QApplication.processEvents()
         try:
-            payload = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode("utf-8")
+            if self.is_ollama_endpoint(endpoint):
+                payload_data = {"model": model, "prompt": prompt, "stream": False}
+            else:
+                payload_data = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": "You are a practical budget analyst. Keep advice specific and grounded in the provided data."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.2,
+                    "stream": False,
+                }
+            payload = json.dumps(payload_data).encode("utf-8")
             request = urllib.request.Request(endpoint, data=payload, headers={"Content-Type": "application/json", "User-Agent": "PocketLedgerQt"})
             with urllib.request.urlopen(request, timeout=120) as response:
                 data = json.loads(response.read().decode("utf-8"))
-            answer = data.get("response") or data.get("message", {}).get("content") or json.dumps(data, indent=2)
+            answer = (
+                data.get("response")
+                or data.get("message", {}).get("content")
+                or (data.get("choices") or [{}])[0].get("message", {}).get("content")
+                or (data.get("choices") or [{}])[0].get("text")
+                or json.dumps(data, indent=2)
+            )
             self.llm_answer.setPlainText(str(answer).strip())
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-            self.llm_answer.setPlainText(f"Could not reach the local LLM.\n\nCheck that Ollama/local model is running and Settings has the right endpoint/model.\n\n{exc}")
+            self.llm_answer.setPlainText(f"Could not reach the local LLM.\n\nCheck that Ollama/LM Studio/local model is running and Settings has the right endpoint/model.\n\nEndpoint tried: {endpoint}\n\n{exc}")
 
     def version_tuple(self, value: str) -> tuple[int, ...]:
         parts = []
