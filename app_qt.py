@@ -6,8 +6,10 @@ the same local SQLite database in ~/PocketLedger/budget.db.
 from __future__ import annotations
 
 import calendar
+import csv
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import urllib.error
@@ -27,6 +29,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -43,12 +46,13 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 
-APP_VERSION = "0.2.19"
+APP_VERSION = "0.2.20"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -416,6 +420,8 @@ class PocketLedgerQt(QMainWindow):
         self.insight_source_bars = BarsWidget()
         self.insight_metric_grid = QGridLayout()
         self.insight_detail_table = None
+        self.llm_prompt = QTextEdit()
+        self.llm_answer = QTextEdit()
         self.insight_month_start = date.today().replace(day=1)
         self.insight_month_label = QLabel()
         self.cashflow_metric_grid = QGridLayout()
@@ -431,6 +437,7 @@ class PocketLedgerQt(QMainWindow):
         self.card_debt_bars = BarsWidget()
         self.loan_debt_bars = BarsWidget()
         self.update_status = QLabel("Not checked yet.")
+        self.export_status = QLabel("No export run yet.")
         self._build()
         self.refresh_all()
 
@@ -642,6 +649,28 @@ class PocketLedgerQt(QMainWindow):
         self.insight_detail_table = self.table(("Description", "Category", "Source", "Total", "Count"))
         self.insight_detail_table.setMinimumHeight(320)
         layout.addWidget(self.card_frame("Top descriptions", self.insight_detail_table))
+        llm_card = QFrame()
+        llm_card.setObjectName("card")
+        llm_layout = QVBoxLayout(llm_card)
+        llm_layout.setContentsMargins(18, 16, 18, 18)
+        llm_title = QLabel("Ask local LLM")
+        llm_title.setObjectName("sectionTitle")
+        llm_hint = QLabel("Sends this month's summarized ledger data to your configured local endpoint. Default is Ollama on localhost.")
+        llm_hint.setObjectName("cardText")
+        llm_hint.setWordWrap(True)
+        self.llm_prompt.setPlaceholderText("Example: What spending stands out this month, and what should I watch before next payday?")
+        self.llm_prompt.setMinimumHeight(90)
+        self.llm_answer.setReadOnly(True)
+        self.llm_answer.setMinimumHeight(180)
+        ask = QPushButton("Ask local LLM")
+        ask.setObjectName("primary")
+        ask.clicked.connect(self.ask_local_llm)
+        llm_layout.addWidget(llm_title)
+        llm_layout.addWidget(llm_hint)
+        llm_layout.addWidget(self.llm_prompt)
+        llm_layout.addWidget(ask, alignment=Qt.AlignRight)
+        llm_layout.addWidget(self.llm_answer)
+        layout.addWidget(llm_card)
         return page
 
     def settings_page(self) -> QWidget:
@@ -673,6 +702,56 @@ class PocketLedgerQt(QMainWindow):
         body.addWidget(self.update_status)
         body.addLayout(button_row)
         layout.addWidget(card)
+        export_card = QFrame()
+        export_card.setObjectName("card")
+        export_layout = QVBoxLayout(export_card)
+        export_layout.setContentsMargins(18, 16, 18, 18)
+        export_title = QLabel("Exports + backups")
+        export_title.setObjectName("sectionTitle")
+        export_help = QLabel("Export readable CSV/JSON copies or make a raw database backup before big changes.")
+        export_help.setObjectName("cardText")
+        export_help.setWordWrap(True)
+        self.export_status.setObjectName("cardText")
+        export_buttons = QHBoxLayout()
+        export_csv = QPushButton("Export ledger CSVs")
+        export_cashflow = QPushButton("Export cashflow CSV")
+        export_json = QPushButton("Export full JSON")
+        backup = QPushButton("Backup database")
+        export_csv.clicked.connect(self.export_ledger_csvs)
+        export_cashflow.clicked.connect(self.export_cashflow_csv)
+        export_json.clicked.connect(self.export_full_json)
+        backup.clicked.connect(self.backup_database)
+        export_buttons.addWidget(export_csv)
+        export_buttons.addWidget(export_cashflow)
+        export_buttons.addWidget(export_json)
+        export_buttons.addWidget(backup)
+        export_buttons.addStretch()
+        export_layout.addWidget(export_title)
+        export_layout.addWidget(export_help)
+        export_layout.addWidget(self.export_status)
+        export_layout.addLayout(export_buttons)
+        layout.addWidget(export_card)
+        llm_settings = QFrame()
+        llm_settings.setObjectName("card")
+        llm_settings_layout = QVBoxLayout(llm_settings)
+        llm_settings_layout.setContentsMargins(18, 16, 18, 18)
+        llm_settings_title = QLabel("Local LLM")
+        llm_settings_title.setObjectName("sectionTitle")
+        llm_settings_text = QLabel(
+            "Insights can ask a local model for spending notes. Default endpoint is Ollama: http://127.0.0.1:11434/api/generate"
+        )
+        llm_settings_text.setObjectName("cardText")
+        llm_settings_text.setWordWrap(True)
+        llm_button_row = QHBoxLayout()
+        configure_llm = QPushButton("Configure local LLM")
+        configure_llm.setObjectName("primary")
+        configure_llm.clicked.connect(self.configure_llm)
+        llm_button_row.addWidget(configure_llm)
+        llm_button_row.addStretch()
+        llm_settings_layout.addWidget(llm_settings_title)
+        llm_settings_layout.addWidget(llm_settings_text)
+        llm_settings_layout.addLayout(llm_button_row)
+        layout.addWidget(llm_settings)
         setup_note = QLabel("Configure the recurring structure here. The main tabs use this data for dashboards, cashflow, and insights.")
         setup_note.setObjectName("cardText")
         setup_note.setWordWrap(True)
@@ -1318,6 +1397,169 @@ class PocketLedgerQt(QMainWindow):
             income_at_start = float(source["amount"] or 0)
             period_start = payday
         return rows
+
+    def row_dicts(self, rows) -> list[dict]:
+        return [dict(row) for row in rows]
+
+    def write_csv(self, path: Path, rows: list[dict]) -> None:
+        headers = sorted({key for row in rows for key in row.keys()})
+        with path.open("w", newline="", encoding="utf-8-sig") as handle:
+            writer = csv.DictWriter(handle, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def export_ledger_csvs(self) -> None:
+        folder_text = QFileDialog.getExistingDirectory(self, "Choose export folder")
+        if not folder_text:
+            return
+        folder = Path(folder_text) / f"PocketLedger-export-{date.today().isoformat()}"
+        folder.mkdir(parents=True, exist_ok=True)
+        cash, bills, income, cards, loans, transactions, spending = self.rows()
+        exports = {
+            "cash_account.csv": [dict(cash)],
+            "bills.csv": self.row_dicts(bills),
+            "income.csv": self.row_dicts(income),
+            "cards.csv": self.row_dicts(cards),
+            "loans.csv": self.row_dicts(loans),
+            "cash_activity.csv": self.row_dicts(transactions),
+            "spending.csv": self.row_dicts(spending),
+        }
+        for name, rows in exports.items():
+            self.write_csv(folder / name, rows)
+        self.export_status.setText(f"Exported ledger CSVs to {folder}")
+        QMessageBox.information(self, "Export complete", f"Ledger CSVs exported to:\n{folder}")
+
+    def export_cashflow_csv(self) -> None:
+        path_text, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export upcoming cashflow",
+            str(Path.home() / "Downloads" / f"PocketLedger-cashflow-{date.today().isoformat()}.csv"),
+            "CSV files (*.csv)",
+        )
+        if not path_text:
+            return
+        cash, bills, income, cards, loans, transactions, _spending = self.rows()
+        today = date.today()
+        start_date = self.parse_date(cash["start_date"])
+        change_start = start_date + timedelta(days=1)
+        income_received = self.scheduled_income_between(income, change_start, today)
+        due_outflow = self.scheduled_checking_outflow_between(bills, cards, loans, change_start, today)
+        actual_spending = self.transaction_total_between(transactions, change_start, today)
+        extra_income = sum(row["amount"] for row in transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
+        cash_today = float(cash["starting_balance"] or 0) + income_received + extra_income - due_outflow - actual_spending
+        timeline = self.upcoming_events(bills, income, cards, loans, transactions, cash_today, today, today + timedelta(days=90))
+        rows = [{"date": row["date"], "type": row["kind"], "name": row["name"], "amount": row["amount"], "running_cash": row["running"]} for row in timeline]
+        self.write_csv(Path(path_text), rows)
+        self.export_status.setText(f"Exported cashflow CSV to {path_text}")
+        QMessageBox.information(self, "Export complete", f"Cashflow CSV exported to:\n{path_text}")
+
+    def export_full_json(self) -> None:
+        path_text, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export full data",
+            str(Path.home() / "Downloads" / f"PocketLedger-full-export-{date.today().isoformat()}.json"),
+            "JSON files (*.json)",
+        )
+        if not path_text:
+            return
+        tables = ("ledgers", "cash_accounts", "bills", "income", "cards", "loans", "transactions", "cc_spending", "paid_scheduled", "scheduled_overrides", "settings")
+        data = {
+            "app": "Pocket Ledger",
+            "version": APP_VERSION,
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "tables": {table: self.row_dicts(self.store.rows(f"SELECT * FROM {table}")) for table in tables},
+        }
+        Path(path_text).write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self.export_status.setText(f"Exported full JSON to {path_text}")
+        QMessageBox.information(self, "Export complete", f"Full JSON exported to:\n{path_text}")
+
+    def backup_database(self) -> None:
+        path_text, _ = QFileDialog.getSaveFileName(
+            self,
+            "Backup database",
+            str(Path.home() / "Downloads" / f"PocketLedger-budget-backup-{date.today().isoformat()}.db"),
+            "SQLite database (*.db)",
+        )
+        if not path_text:
+            return
+        self.store.conn.commit()
+        shutil.copy2(DB_PATH, path_text)
+        self.export_status.setText(f"Backed up database to {path_text}")
+        QMessageBox.information(self, "Backup complete", f"Database backup saved to:\n{path_text}")
+
+    def configure_llm(self) -> None:
+        dialog = RowDialog(
+            "Configure local LLM",
+            [("llm_endpoint", "text", ()), ("llm_model", "text", ())],
+            {
+                "llm_endpoint": self.store.setting("llm_endpoint", "http://127.0.0.1:11434/api/generate"),
+                "llm_model": self.store.setting("llm_model", "llama3.1"),
+            },
+            self,
+        )
+        values = dialog.values() if dialog.exec() == QDialog.Accepted else None
+        if not values:
+            return
+        endpoint = str(values["llm_endpoint"]).strip()
+        if not (endpoint.startswith("http://127.0.0.1") or endpoint.startswith("http://localhost")):
+            QMessageBox.warning(self, "Local only", "For now, Pocket Ledger only allows localhost LLM endpoints so your budget data stays on this computer.")
+            return
+        self.store.set_setting("llm_endpoint", endpoint)
+        self.store.set_setting("llm_model", str(values["llm_model"]).strip() or "llama3.1")
+
+    def llm_month_summary(self) -> dict:
+        cash, bills, income, cards, loans, transactions, spending = self.rows()
+        start = self.insight_month_start
+        end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
+        by_category: dict[str, float] = {}
+        purchases = []
+        checking = []
+        for row in spending:
+            d = self.parse_date(row["spend_date"])
+            if start <= d <= end:
+                amount = float(row["amount"] or 0)
+                by_category[row["category"]] = by_category.get(row["category"], 0) + amount
+                purchases.append({"date": row["spend_date"], "account": row["card_name"], "description": row["description"], "category": row["category"], "amount": amount})
+        for row in transactions:
+            d = self.parse_date(row["trans_date"])
+            if start <= d <= end:
+                amount = float(row["amount"] or 0)
+                checking.append({"date": row["trans_date"], "description": row["description"], "category": row["category"], "amount": amount})
+        return {
+            "month": f"{start:%B %Y}",
+            "cash_account": dict(cash),
+            "spending_by_category": dict(sorted(by_category.items(), key=lambda item: item[1], reverse=True)),
+            "top_purchases": sorted(purchases, key=lambda row: row["amount"], reverse=True)[:25],
+            "checking_activity": sorted(checking, key=lambda row: row["amount"], reverse=True)[:25],
+            "recurring_bills": [{"name": row["name"], "category": row["category"], "paid_from": row["paid_from"], "amount": float(row["amount"] or 0), "due_day": row["due_day"]} for row in bills],
+            "income": [{"name": row["name"], "amount": float(row["amount"] or 0), "pay_day": row["pay_day"]} for row in income],
+            "cards": [{"name": row["name"], "balance": float(row["balance"] or 0), "limit": float(row["credit_limit"] or 0), "apr": float(row["apr"] or 0)} for row in cards],
+            "loans": [{"name": row["name"], "remaining": self.loan_remaining(row), "original": self.loan_original_amount(row), "payment": float(row["payment"] or 0), "apr": float(row["apr"] or 0)} for row in loans],
+        }
+
+    def ask_local_llm(self) -> None:
+        endpoint = self.store.setting("llm_endpoint", "http://127.0.0.1:11434/api/generate")
+        model = self.store.setting("llm_model", "llama3.1")
+        if not (endpoint.startswith("http://127.0.0.1") or endpoint.startswith("http://localhost")):
+            QMessageBox.warning(self, "Local only", "The configured LLM endpoint is not localhost. Open Settings and use a local endpoint first.")
+            return
+        question = self.llm_prompt.toPlainText().strip() or "Analyze this month's spending and tell me what stands out, what risks I should watch, and 3 practical budget tips."
+        prompt = (
+            "You are helping analyze a household budget. Be practical, concise, and call out cashflow or spending risks. "
+            "Use only the JSON data provided.\n\n"
+            f"Question: {question}\n\nLedger JSON:\n{json.dumps(self.llm_month_summary(), indent=2)}"
+        )
+        self.llm_answer.setPlainText("Asking local LLM...")
+        QApplication.processEvents()
+        try:
+            payload = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode("utf-8")
+            request = urllib.request.Request(endpoint, data=payload, headers={"Content-Type": "application/json", "User-Agent": "PocketLedgerQt"})
+            with urllib.request.urlopen(request, timeout=120) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            answer = data.get("response") or data.get("message", {}).get("content") or json.dumps(data, indent=2)
+            self.llm_answer.setPlainText(str(answer).strip())
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+            self.llm_answer.setPlainText(f"Could not reach the local LLM.\n\nCheck that Ollama/local model is running and Settings has the right endpoint/model.\n\n{exc}")
 
     def version_tuple(self, value: str) -> tuple[int, ...]:
         parts = []
