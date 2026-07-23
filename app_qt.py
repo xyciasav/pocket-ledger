@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.5"
+APP_VERSION = "0.2.6"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -400,6 +400,7 @@ class PocketLedgerQt(QMainWindow):
         self.insight_source_bars = BarsWidget()
         self.insight_metric_grid = QGridLayout()
         self.insight_detail_table = None
+        self.insight_month = QDateEdit()
         self.cashflow_metric_grid = QGridLayout()
         self.cashflow_visual = TimelineWidget()
         self.cashflow_summary = QLabel()
@@ -455,8 +456,9 @@ class PocketLedgerQt(QMainWindow):
             self.nav_buttons.append(button)
             layout.addWidget(button)
         layout.addStretch()
-        refresh = QPushButton("Refresh")
+        refresh = QPushButton("Reload data")
         refresh.setObjectName("primary")
+        refresh.setToolTip("Re-read the local budget database and recalculate every page.")
         refresh.clicked.connect(self.refresh_all)
         layout.addWidget(refresh)
         return side
@@ -557,6 +559,26 @@ class PocketLedgerQt(QMainWindow):
 
     def insights_page(self) -> QWidget:
         page, layout = self.shell("Insights", "Visual breakdown of spending, bills, cards, and debt payments.")
+        filter_card = QFrame()
+        filter_card.setObjectName("card")
+        filter_row = QHBoxLayout(filter_card)
+        filter_row.setContentsMargins(18, 14, 18, 14)
+        label = QLabel("View month")
+        label.setObjectName("sectionTitle")
+        previous = QPushButton("Previous")
+        next_month = QPushButton("Next")
+        self.insight_month.setDisplayFormat("MMMM yyyy")
+        self.insight_month.setCalendarPopup(True)
+        self.insight_month.setDate(date.today().replace(day=1))
+        self.insight_month.dateChanged.connect(lambda _value: self.refresh_all())
+        previous.clicked.connect(lambda: self.shift_insight_month(-1))
+        next_month.clicked.connect(lambda: self.shift_insight_month(1))
+        filter_row.addWidget(label)
+        filter_row.addStretch()
+        filter_row.addWidget(previous)
+        filter_row.addWidget(self.insight_month)
+        filter_row.addWidget(next_month)
+        layout.addWidget(filter_card)
         self.insight_metric_grid.setSpacing(14)
         layout.addLayout(self.insight_metric_grid)
         chart_row = QHBoxLayout()
@@ -887,8 +909,11 @@ class PocketLedgerQt(QMainWindow):
         for idx, metric in enumerate(metrics):
             self.spending_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
 
+    def shift_insight_month(self, months: int) -> None:
+        self.insight_month.setDate(self.insight_month.date().addMonths(months))
+
     def refresh_insights(self, bills, cards, loans, transactions, spending) -> None:
-        start = date.today().replace(day=1)
+        start = self.insight_month.date().toPython().replace(day=1)
         end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
         records = []
         for row in transactions:
@@ -934,7 +959,7 @@ class PocketLedgerQt(QMainWindow):
             if widget:
                 widget.setParent(None)
         metrics = (
-            Metric("Month total", money(total), f"{date.today():%B %Y}", "blue"),
+            Metric("Month total", money(total), f"{start:%B %Y}", "blue"),
             Metric("Items counted", str(count), "Transactions, scheduled bills, and debt payments.", "slate"),
             Metric("Top category", top_category, "Largest category in this view.", "teal"),
             Metric("Average item", money(avg), "Average across counted records.", "slate"),
