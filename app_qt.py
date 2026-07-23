@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.13"
+APP_VERSION = "0.2.14"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -252,6 +252,7 @@ class BarsWidget(QWidget):
         super().__init__()
         self.rows: list[tuple] = []
         self.setMinimumHeight(280)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
     def set_rows(self, rows: list[tuple]) -> None:
         self.rows = rows
@@ -401,8 +402,8 @@ class PocketLedgerQt(QMainWindow):
         self.store = Store()
         self.ledger_id = self.store.active_ledger_id()
         self.setWindowTitle(f"Pocket Ledger Qt Preview {APP_VERSION}")
-        self.resize(1480, 920)
-        self.setMinimumSize(1120, 720)
+        self.resize(1680, 1000)
+        self.setMinimumSize(1280, 780)
         self.nav_buttons: list[QPushButton] = []
         self.pages = QStackedWidget()
         self.ledger_combo = QComboBox()
@@ -673,10 +674,11 @@ class PocketLedgerQt(QMainWindow):
         frame.setObjectName("card")
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(18, 16, 18, 18)
+        layout.setAlignment(Qt.AlignTop)
         label = QLabel(title)
         label.setObjectName("sectionTitle")
         layout.addWidget(label)
-        layout.addWidget(child)
+        layout.addWidget(child, 1, alignment=Qt.AlignTop)
         return frame
 
     def entity_card(self, title: str, table: QTableWidget, add, edit, delete) -> QFrame:
