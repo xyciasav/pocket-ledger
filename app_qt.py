@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 APP_DIR = Path.home() / "PocketLedger"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = APP_DIR / "budget.db"
@@ -384,7 +384,10 @@ class PocketLedgerQt(QMainWindow):
         layout.addWidget(subtitle)
         layout.addSpacing(18)
         self.ledger_combo.currentIndexChanged.connect(self.switch_ledger)
-        layout.addWidget(QLabel("Ledger"))
+        ledger_label = QLabel("Ledger")
+        ledger_label.setObjectName("sideLabel")
+        layout.addWidget(ledger_label)
+        self.ledger_combo.setObjectName("ledgerCombo")
         layout.addWidget(self.ledger_combo)
         layout.addSpacing(18)
         for name in ("Overview", "Cashflow", "Bills + Income", "Debt", "Spending", "Insights"):
@@ -534,6 +537,7 @@ class PocketLedgerQt(QMainWindow):
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setSelectionMode(QTableWidget.SingleSelection)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        table.verticalHeader().setDefaultSectionSize(32)
         table.setMinimumHeight(240)
         table.setSortingEnabled(True)
         return table
@@ -951,9 +955,16 @@ STYLE = """
 #sidebar { background: #0f172a; }
 #brand { color: #ffffff; font: 700 22px 'Segoe UI'; }
 #sideMuted { color: #94a3b8; }
+#sideLabel { color: #cbd5e1; font: 700 9pt 'Segoe UI'; }
 QLabel { color: #18243b; font: 10pt 'Segoe UI'; }
 QComboBox, QLineEdit, QDateEdit, QSpinBox, QDoubleSpinBox {
-    background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px;
+    background: #ffffff; color: #0f172a; selection-background-color: #bfdbfe;
+    selection-color: #0f172a; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px;
+}
+QComboBox#ledgerCombo { background: #ffffff; color: #0f172a; min-height: 22px; }
+QComboBox QAbstractItemView {
+    background: #ffffff; color: #0f172a; selection-background-color: #dbeafe;
+    selection-color: #0f172a; border: 1px solid #cbd5e1; outline: 0;
 }
 QPushButton {
     background: #e2e8f0; border: none; border-radius: 9px; padding: 9px 14px;
@@ -987,12 +998,12 @@ QPushButton#nav:hover, QPushButton#nav[active="true"] {
 #muted, #cardText { color: #64748b; }
 QTableWidget {
     background: #ffffff; alternate-background-color: #f8fafc; gridline-color: #e2e8f0;
-    border: 1px solid #e2e8f0; border-radius: 10px;
+    border: 1px solid #e2e8f0; border-radius: 10px; color: #0f172a;
 }
+QTableWidget::item { color: #0f172a; padding: 8px; }
 QHeaderView::section {
     background: #e2e8f0; color: #334155; padding: 8px; border: none; font-weight: 700;
 }
-QTableWidget::item { padding: 8px; }
 QTableWidget::item:selected { background: #bfdbfe; color: #0f172a; }
 """
 
