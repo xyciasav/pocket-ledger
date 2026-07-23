@@ -54,7 +54,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.22"
+APP_VERSION = "0.2.23"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -741,7 +741,8 @@ class PocketLedgerQt(QMainWindow):
         llm_settings_title.setObjectName("sectionTitle")
         llm_settings_text = QLabel(
             "Insights can ask a local model for spending notes. Use Ollama /api/generate or LM Studio/OpenAI-compatible /v1/chat/completions. "
-            "Private LAN addresses like http://10.0.0.156:1234 are allowed and will auto-fill the chat endpoint."
+            "Private LAN addresses like http://10.0.0.156:1234 are allowed and will auto-fill the chat endpoint. "
+            "If your server returns 401, add its API key here."
         )
         llm_settings_text.setObjectName("cardText")
         llm_settings_text.setWordWrap(True)
@@ -1493,10 +1494,17 @@ class PocketLedgerQt(QMainWindow):
     def configure_llm(self) -> None:
         dialog = RowDialog(
             "Configure local LLM",
-            [("llm_endpoint", "text", ()), ("llm_model", "text", ())],
+            [
+                ("llm_endpoint", "text", ()),
+                ("llm_model", "text", ()),
+                ("llm_format", "choice", ("Auto", "OpenAI chat", "Ollama generate", "Ollama chat", "Text generation web UI")),
+                ("llm_api_key", "text", ()),
+            ],
             {
                 "llm_endpoint": self.store.setting("llm_endpoint", "http://127.0.0.1:11434/api/generate"),
                 "llm_model": self.store.setting("llm_model", "llama3.1"),
+                "llm_format": self.store.setting("llm_format", "Auto"),
+                "llm_api_key": self.store.setting("llm_api_key", ""),
             },
             self,
         )
@@ -1509,6 +1517,8 @@ class PocketLedgerQt(QMainWindow):
             return
         self.store.set_setting("llm_endpoint", endpoint)
         self.store.set_setting("llm_model", str(values["llm_model"]).strip() or "llama3.1")
+        self.store.set_setting("llm_format", str(values["llm_format"]).strip() or "Auto")
+        self.store.set_setting("llm_api_key", str(values["llm_api_key"]).strip())
 
     def normalize_llm_endpoint(self, endpoint: str) -> str:
         if not endpoint:
@@ -1536,6 +1546,55 @@ class PocketLedgerQt(QMainWindow):
 
     def is_ollama_endpoint(self, endpoint: str) -> bool:
         return urllib.parse.urlparse(endpoint).path.rstrip("/") == "/api/generate"
+
+    def llm_format_for_endpoint(self, endpoint: str) -> str:
+        configured = self.store.setting("llm_format", "Auto")
+        if configured != "Auto":
+            return configured
+        path = urllib.parse.urlparse(endpoint).path.rstrip("/")
+        if path == "/api/generate":
+            return "Ollama generate"
+        if path == "/api/chat":
+            return "Ollama chat"
+        if path == "/api/v1/generate":
+            return "Text generation web UI"
+        return "OpenAI chat"
+
+    def llm_payload(self, endpoint: str, model: str, prompt: str) -> dict:
+        llm_format = self.llm_format_for_endpoint(endpoint)
+        if llm_format == "Ollama generate":
+            return {"model": model, "prompt": prompt, "stream": False}
+        if llm_format == "Ollama chat":
+            return {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a practical budget analyst. Keep advice specific and grounded in the provided data."},
+                    {"role": "user", "content": prompt},
+                ],
+                "stream": False,
+            }
+        if llm_format == "Text generation web UI":
+            return {"prompt": prompt, "max_new_tokens": 1600, "temperature": 0.2}
+        return {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are a practical budget analyst. Keep advice specific and grounded in the provided data."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+            "stream": False,
+        }
+
+    def llm_answer_from_response(self, data: dict) -> str:
+        return str(
+            data.get("response")
+            or data.get("message", {}).get("content")
+            or (data.get("choices") or [{}])[0].get("message", {}).get("content")
+            or (data.get("choices") or [{}])[0].get("text")
+            or (data.get("results") or [{}])[0].get("text")
+            or data.get("text")
+            or json.dumps(data, indent=2)
+        ).strip()
 
     def llm_month_summary(self) -> dict:
         cash, bills, income, cards, loans, transactions, spending = self.rows()
@@ -1603,6 +1662,7 @@ class PocketLedgerQt(QMainWindow):
     def ask_local_llm(self) -> None:
         endpoint = self.normalize_llm_endpoint(self.store.setting("llm_endpoint", "http://127.0.0.1:11434/api/generate"))
         model = self.store.setting("llm_model", "llama3.1")
+        api_key = self.store.setting("llm_api_key", "")
         if not self.is_allowed_llm_endpoint(endpoint):
             QMessageBox.warning(self, "Local/private only", "The configured LLM endpoint is not localhost or a private LAN address. Open Settings and use a local/private endpoint first.")
             return
@@ -1622,30 +1682,26 @@ class PocketLedgerQt(QMainWindow):
         self.llm_answer.setPlainText("Generating local AI rundown...")
         QApplication.processEvents()
         try:
-            if self.is_ollama_endpoint(endpoint):
-                payload_data = {"model": model, "prompt": prompt, "stream": False}
-            else:
-                payload_data = {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": "You are a practical budget analyst. Keep advice specific and grounded in the provided data."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": 0.2,
-                    "stream": False,
-                }
-            payload = json.dumps(payload_data).encode("utf-8")
-            request = urllib.request.Request(endpoint, data=payload, headers={"Content-Type": "application/json", "User-Agent": "PocketLedgerQt"})
+            payload = json.dumps(self.llm_payload(endpoint, model, prompt)).encode("utf-8")
+            headers = {"Content-Type": "application/json", "User-Agent": "PocketLedgerQt"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            request = urllib.request.Request(endpoint, data=payload, headers=headers)
             with urllib.request.urlopen(request, timeout=120) as response:
                 data = json.loads(response.read().decode("utf-8"))
-            answer = (
-                data.get("response")
-                or data.get("message", {}).get("content")
-                or (data.get("choices") or [{}])[0].get("message", {}).get("content")
-                or (data.get("choices") or [{}])[0].get("text")
-                or json.dumps(data, indent=2)
+            self.llm_answer.setPlainText(self.llm_answer_from_response(data))
+        except urllib.error.HTTPError as exc:
+            try:
+                body = exc.read().decode("utf-8", errors="replace")
+            except OSError:
+                body = ""
+            self.llm_answer.setPlainText(
+                f"Local LLM returned HTTP {exc.code}: {exc.reason}\n\n"
+                f"Endpoint tried: {endpoint}\n"
+                f"Format: {self.llm_format_for_endpoint(endpoint)}\n\n"
+                f"{body or 'No response body returned.'}\n\n"
+                "If this is 401 Unauthorized, add the server API key in Settings > Local LLM."
             )
-            self.llm_answer.setPlainText(str(answer).strip())
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
             self.llm_answer.setPlainText(f"Could not reach the local LLM.\n\nCheck that Ollama/LM Studio/local model is running and Settings has the right endpoint/model.\n\nEndpoint tried: {endpoint}\n\n{exc}")
 
