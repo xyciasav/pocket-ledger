@@ -25,11 +25,17 @@ if "--self-test-tk" in sys.argv:
 APP_DIR = Path.home() / "PocketLedger"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = APP_DIR / "budget.db"
-APP_VERSION = "0.1.10"
+APP_VERSION = "0.1.11"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
 WHATS_NEW = {
+    "0.1.11": [
+        "Refreshed the visual style with a softer modern palette, stronger typography, and cleaner action buttons.",
+        "Renamed Dashboard to Overview and Setup to Bills + Income so the navigation is easier to understand.",
+        "Added hero panels and clearer section cards across Overview, Cashflow, Bills + Income, Debt, Spending, and Insights.",
+        "Updated Insights charts with larger visual category cards, colored bars, and cleaner detail breakdowns.",
+    ],
     "0.1.10": [
         "Added a dedicated Debt tab so credit cards and loans are no longer buried in Setup.",
         "Improved the updater so downloaded ZIP releases are extracted and can launch the updated exe directly.",
@@ -79,6 +85,17 @@ WHATS_NEW = {
 }
 DEFAULT_LEDGER_NAME = "Personal"
 DEFAULT_CASH_ACCOUNT_NAME = "Main checking"
+BG = "#eef3f8"
+CARD_BG = "#ffffff"
+INK = "#18243b"
+MUTED = "#64748b"
+TEAL = "#0f766e"
+TEAL_DARK = "#115e59"
+BLUE = "#2563eb"
+SOFT_BLUE = "#dbeafe"
+SOFT_TEAL = "#ccfbf1"
+SOFT_RED = "#fee2e2"
+SOFT_GREEN = "#dcfce7"
 CATEGORIES = ("Fixed", "Utilities", "Other")
 EXTRA_INCOME_CATEGORY = "Extra Income"
 SPENDING_CATEGORIES = ("Groceries", "Dining", "Gas & Transport", "Shopping", "Health", "Entertainment", "Bills", "Credit Card Payment", EXTRA_INCOME_CATEGORY, "Other")
@@ -242,7 +259,7 @@ class LedgerApp(tk.Tk):
         self.title("Pocket Ledger")
         self.geometry("1500x920")
         self.minsize(1180, 760)
-        self.configure(bg="#f5f7fb")
+        self.configure(bg=BG)
         self._style()
         self._build_header()
         self.notebook = ttk.Notebook(self)
@@ -254,9 +271,9 @@ class LedgerApp(tk.Tk):
         self.spending_tab = ttk.Frame(self.notebook, padding=18)
         self.data_tab = ttk.Frame(self.notebook, padding=18)
         self.settings_tab_outer = ttk.Frame(self.notebook)
-        self.notebook.add(self.dashboard_tab, text="  Dashboard  ")
+        self.notebook.add(self.dashboard_tab, text="  Overview  ")
         self.notebook.add(self.cashflow_tab_outer, text="  Cashflow  ")
-        self.notebook.add(self.setup_tab_outer, text="  Setup  ")
+        self.notebook.add(self.setup_tab_outer, text="  Bills + Income  ")
         self.notebook.add(self.debt_tab, text="  Debt  ")
         self.notebook.add(self.spending_tab, text="  Spending  ")
         self.notebook.add(self.data_tab, text="  Insights  ")
@@ -279,28 +296,40 @@ class LedgerApp(tk.Tk):
     def _style(self) -> None:
         style = ttk.Style(self)
         style.theme_use("clam")
-        style.configure("TFrame", background="#f5f7fb")
-        style.configure("Card.TFrame", background="#ffffff")
-        style.configure("TLabel", background="#f5f7fb", foreground="#25324a", font=("Segoe UI", 10))
-        style.configure("Title.TLabel", font=("Segoe UI Semibold", 22), foreground="#18243b")
-        style.configure("Subtitle.TLabel", foreground="#6b7890")
-        style.configure("CardTitle.TLabel", background="#ffffff", foreground="#637087", font=("Segoe UI", 9))
-        style.configure("Amount.TLabel", background="#ffffff", foreground="#1c6e68", font=("Segoe UI Semibold", 20))
-        style.configure("Treeview", background="#ffffff", fieldbackground="#ffffff", rowheight=31, font=("Segoe UI", 10), borderwidth=0)
-        style.configure("Treeview.Heading", background="#eaf0f7", foreground="#40516d", font=("Segoe UI Semibold", 9), relief="flat")
-        style.map("Treeview", background=[("selected", "#d8eeec")], foreground=[("selected", "#15283a")])
-        style.configure("TButton", font=("Segoe UI Semibold", 9), padding=(12, 7))
-        style.configure("Accent.TButton", background="#147d78", foreground="white")
-        style.map("Accent.TButton", background=[("active", "#0f6964")])
-        style.configure("TNotebook", background="#f5f7fb", borderwidth=0)
-        style.configure("TNotebook.Tab", padding=(14, 9), background="#eaf0f7", foreground="#53627a")
-        style.map("TNotebook.Tab", background=[("selected", "#ffffff")], foreground=[("selected", "#147d78")])
+        style.configure("TFrame", background=BG)
+        style.configure("Card.TFrame", background=CARD_BG, relief="flat")
+        style.configure("Hero.TFrame", background="#e0f2fe", relief="flat")
+        style.configure("TLabel", background=BG, foreground=INK, font=("Segoe UI", 10))
+        style.configure("Hero.TLabel", background="#e0f2fe", foreground=INK)
+        style.configure("Title.TLabel", font=("Segoe UI Semibold", 24), foreground=INK, background=BG)
+        style.configure("HeroTitle.TLabel", font=("Segoe UI Semibold", 25), foreground=INK, background="#e0f2fe")
+        style.configure("Subtitle.TLabel", foreground=MUTED, background=BG)
+        style.configure("HeroSubtitle.TLabel", foreground="#475569", background="#e0f2fe", font=("Segoe UI", 10))
+        style.configure("CardTitle.TLabel", background=CARD_BG, foreground="#64748b", font=("Segoe UI Semibold", 9))
+        style.configure("CardHeading.TLabel", background=CARD_BG, foreground=INK, font=("Segoe UI Semibold", 13))
+        style.configure("CardText.TLabel", background=CARD_BG, foreground=MUTED, font=("Segoe UI", 10))
+        style.configure("Amount.TLabel", background=CARD_BG, foreground=TEAL, font=("Segoe UI Semibold", 22))
+        style.configure("MutedAmount.TLabel", background=CARD_BG, foreground="#334155", font=("Segoe UI Semibold", 18))
+        style.configure("Treeview", background=CARD_BG, fieldbackground=CARD_BG, rowheight=34, font=("Segoe UI", 10), borderwidth=0)
+        style.configure("Treeview.Heading", background="#e2e8f0", foreground="#334155", font=("Segoe UI Semibold", 9), relief="flat", padding=(8, 8))
+        style.map("Treeview", background=[("selected", "#bfdbfe")], foreground=[("selected", "#0f172a")])
+        style.configure("TButton", font=("Segoe UI Semibold", 9), padding=(14, 8), background="#e2e8f0", foreground="#334155", borderwidth=0, focusthickness=0)
+        style.map("TButton", background=[("active", "#cbd5e1")])
+        style.configure("Accent.TButton", background=BLUE, foreground="white", padding=(16, 9), borderwidth=0)
+        style.map("Accent.TButton", background=[("active", "#1d4ed8")], foreground=[("active", "white")])
+        style.configure("Success.TButton", background=TEAL, foreground="white", padding=(16, 9), borderwidth=0)
+        style.map("Success.TButton", background=[("active", TEAL_DARK)], foreground=[("active", "white")])
+        style.configure("TNotebook", background=BG, borderwidth=0)
+        style.configure("TNotebook.Tab", padding=(18, 10), background="#dbe4ee", foreground="#475569", font=("Segoe UI Semibold", 10))
+        style.map("TNotebook.Tab", background=[("selected", CARD_BG)], foreground=[("selected", TEAL)])
 
     def _build_header(self) -> None:
-        header = ttk.Frame(self, padding=(24, 20, 24, 12))
+        header = ttk.Frame(self, padding=(24, 18, 24, 10))
         header.pack(fill="x")
-        ttk.Label(header, text="Pocket Ledger", style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text="Your money, clearly organized.", style="Subtitle.TLabel").pack(side="left", padx=14, pady=7)
+        brand = ttk.Frame(header)
+        brand.pack(side="left")
+        ttk.Label(brand, text="Pocket Ledger", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(brand, text="A local-first command center for cashflow, spending, and debt.", style="Subtitle.TLabel").pack(anchor="w", pady=(1, 0))
         ttk.Button(header, text="+ Ledger", command=self.ledger_dialog).pack(side="right", padx=(8, 0))
         self.ledger_choice = ttk.Combobox(header, textvariable=self.ledger_var, state="readonly", width=22)
         self.ledger_choice.pack(side="right", padx=(8, 0))
@@ -310,10 +339,10 @@ class LedgerApp(tk.Tk):
         ttk.Button(header, text="Export", command=self.export_full_data).pack(side="right")
         ttk.Button(header, text="Backup", command=self.backup_data).pack(side="right", padx=(8, 0))
         ttk.Button(header, text="CSV", command=self.export_transactions).pack(side="right")
-        ttk.Button(header, text="Refresh", command=self.refresh_all).pack(side="right")
+        ttk.Button(header, text="Refresh", style="Success.TButton", command=self.refresh_all).pack(side="right")
 
     def scrollable_tab(self, outer: ttk.Frame) -> ttk.Frame:
-        canvas = tk.Canvas(outer, background="#f5f7fb", highlightthickness=0)
+        canvas = tk.Canvas(outer, background=BG, highlightthickness=0)
         scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
@@ -365,19 +394,25 @@ class LedgerApp(tk.Tk):
         self.form("Add ledger", [("Ledger name","text",()),("Notes","text",())], {"Ledger name":"Business"}, save)
 
     def card(self, parent: ttk.Frame, title: str, variable: tk.StringVar, col: int) -> None:
-        frame = ttk.Frame(parent, style="Card.TFrame", padding=16)
-        frame.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 10, 0))
+        frame = ttk.Frame(parent, style="Card.TFrame", padding=(18, 16))
+        frame.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 12, 0))
         ttk.Label(frame, text=title.upper(), style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(frame, textvariable=variable, style="Amount.TLabel").pack(anchor="w", pady=(7, 0))
 
     def metric_card(self, parent: ttk.Frame, title: str, variable: tk.StringVar, row: int, col: int) -> None:
-        frame = ttk.Frame(parent, style="Card.TFrame", padding=16)
-        frame.grid(row=row, column=col, sticky="nsew", padx=(0 if col == 0 else 10, 0), pady=(0 if row == 0 else 10, 0))
+        frame = ttk.Frame(parent, style="Card.TFrame", padding=(18, 16))
+        frame.grid(row=row, column=col, sticky="nsew", padx=(0 if col == 0 else 12, 0), pady=(0 if row == 0 else 12, 0))
         ttk.Label(frame, text=title.upper(), style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(frame, textvariable=variable, style="Amount.TLabel").pack(anchor="w", pady=(7, 0))
 
+    def hero_panel(self, parent: ttk.Frame, title: str, subtitle: str) -> None:
+        hero = ttk.Frame(parent, style="Hero.TFrame", padding=(22, 18))
+        hero.pack(fill="x", pady=(0, 18))
+        ttk.Label(hero, text=title, style="HeroTitle.TLabel").pack(anchor="w")
+        ttk.Label(hero, text=subtitle, style="HeroSubtitle.TLabel", wraplength=1050, justify="left").pack(anchor="w", pady=(5, 0))
+
     def build_dashboard(self) -> None:
-        canvas = tk.Canvas(self.dashboard_tab, background="#f5f7fb", highlightthickness=0)
+        canvas = tk.Canvas(self.dashboard_tab, background=BG, highlightthickness=0)
         scrollbar = ttk.Scrollbar(self.dashboard_tab, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
@@ -389,10 +424,7 @@ class LedgerApp(tk.Tk):
         canvas.bind("<MouseWheel>", lambda event: canvas.yview_scroll(int(-1 * (event.delta / 120)), "units"))
         dashboard.bind("<MouseWheel>", lambda event: canvas.yview_scroll(int(-1 * (event.delta / 120)), "units"))
 
-        hero = ttk.Frame(dashboard)
-        hero.pack(fill="x", pady=(0, 14))
-        ttk.Label(hero, text="Dashboard", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(hero, text="Checking cash, credit-card pressure, paycheck timing, and upcoming obligations.", style="Subtitle.TLabel").pack(anchor="w", pady=(4, 0))
+        self.hero_panel(dashboard, "Overview", "Checking cash, credit-card pressure, paycheck timing, and upcoming obligations — all in one place.")
 
         self.bank_start_var, self.income_var, self.outflow_var, self.spent_var, self.projected_var, self.card_var = (tk.StringVar() for _ in range(6))
         cards = ttk.Frame(dashboard)
@@ -405,37 +437,34 @@ class LedgerApp(tk.Tk):
         self.metric_card(cards, "Income after baseline", self.income_var, 1, 1)
         self.metric_card(cards, "Due from checking", self.outflow_var, 1, 2)
 
-        account_row = ttk.Frame(dashboard, style="Card.TFrame", padding=(16, 12))
+        account_row = ttk.Frame(dashboard, style="Card.TFrame", padding=(18, 14))
         account_row.pack(fill="x", pady=(0, 14))
         self.account_math_var = tk.StringVar()
         self.money_model_var = tk.StringVar()
         account_header = ttk.Frame(account_row, style="Card.TFrame")
         account_header.pack(fill="x")
-        ttk.Label(account_header, text="ACCOUNT MATH", style="CardTitle.TLabel").pack(side="left")
-        ttk.Button(account_header, text="Set cashflow account", command=self.account_dialog).pack(side="right")
-        ttk.Label(account_row, textvariable=self.account_math_var, style="Subtitle.TLabel", wraplength=900, justify="left").pack(anchor="w", pady=(7, 0))
-        ttk.Label(account_row, textvariable=self.money_model_var, style="Subtitle.TLabel", wraplength=900, justify="left").pack(anchor="w", pady=(7, 0))
+        ttk.Label(account_header, text="Checking model", style="CardHeading.TLabel").pack(side="left")
+        ttk.Button(account_header, text="Set account baseline", style="Success.TButton", command=self.account_dialog).pack(side="right")
+        ttk.Label(account_row, textvariable=self.account_math_var, style="CardText.TLabel", wraplength=1050, justify="left").pack(anchor="w", pady=(8, 0))
+        ttk.Label(account_row, textvariable=self.money_model_var, style="CardText.TLabel", wraplength=1050, justify="left").pack(anchor="w", pady=(7, 0))
 
         self.cashflow_var = tk.StringVar()
-        cashflow = ttk.Frame(dashboard, style="Card.TFrame", padding=(16, 12))
+        cashflow = ttk.Frame(dashboard, style="Card.TFrame", padding=(18, 14))
         cashflow.pack(fill="x", pady=(0, 14))
-        ttk.Label(cashflow, text="NEXT PAYDAY PLAN", style="CardTitle.TLabel").pack(anchor="w")
-        ttk.Label(cashflow, textvariable=self.cashflow_var, style="Subtitle.TLabel", wraplength=980, justify="left").pack(anchor="w", pady=(7, 0))
+        ttk.Label(cashflow, text="Next payday plan", style="CardHeading.TLabel").pack(anchor="w")
+        ttk.Label(cashflow, textvariable=self.cashflow_var, style="CardText.TLabel", wraplength=1050, justify="left").pack(anchor="w", pady=(7, 0))
 
-        spending_room = ttk.Frame(dashboard, style="Card.TFrame", padding=14)
+        spending_room = ttk.Frame(dashboard, style="Card.TFrame", padding=16)
         spending_room.pack(fill="x", pady=(0, 14))
-        ttk.Label(spending_room, text="SPENDING ROOM", style="CardTitle.TLabel").pack(anchor="w")
-        ttk.Label(spending_room, text="Conservative spending room. It protects the lowest upcoming cash point, so rows are not meant to be added together.", style="Subtitle.TLabel").pack(anchor="w", pady=(5, 10))
+        ttk.Label(spending_room, text="Spending room", style="CardHeading.TLabel").pack(anchor="w")
+        ttk.Label(spending_room, text="Conservative spending room. It protects the lowest upcoming cash point, so rows are not meant to be added together.", style="CardText.TLabel").pack(anchor="w", pady=(5, 10))
         self.spending_room_tree = self.tree(spending_room, ("Period", "Starting cash", "Income", "Bills/planned", "After bills", "Safe now", "Per day"), (175, 105, 95, 110, 105, 105, 85))
         self.spending_room_tree.pack(fill="x")
-        self.spending_room_tree.tag_configure("good", background="#eaf7ef")
-        self.spending_room_tree.tag_configure("warning", background="#fdecec")
+        self.spending_room_tree.tag_configure("good", background=SOFT_GREEN)
+        self.spending_room_tree.tag_configure("warning", background=SOFT_RED)
 
     def build_cashflow(self) -> None:
-        header = ttk.Frame(self.cashflow_tab)
-        header.pack(fill="x", pady=(0, 14))
-        ttk.Label(header, text="Cashflow", style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text="A dated forecast of income, scheduled bills, card minimums, and planned bank spending.", style="Subtitle.TLabel").pack(side="left", padx=14, pady=7)
+        self.hero_panel(self.cashflow_tab, "Cashflow", "A dated forecast of income, shared-checking bills, card payments, loans, and planned bank spending.")
 
         self.cashflow_low_var, self.cashflow_income_var, self.cashflow_outflow_var, self.cashflow_end_var = (tk.StringVar() for _ in range(4))
         cashflow_cards = ttk.Frame(self.cashflow_tab)
@@ -446,15 +475,15 @@ class LedgerApp(tk.Tk):
         self.card(cashflow_cards, "Outgoing", self.cashflow_outflow_var, 2)
         self.card(cashflow_cards, "Ending cash", self.cashflow_end_var, 3)
 
-        forecast = ttk.Frame(self.cashflow_tab, style="Card.TFrame", padding=14)
+        forecast = ttk.Frame(self.cashflow_tab, style="Card.TFrame", padding=16)
         forecast.pack(fill="both", expand=True)
-        ttk.Label(forecast, text="CASHFLOW TIMELINE", style="CardTitle.TLabel").pack(anchor="w")
-        ttk.Label(forecast, text="Last 14 days, today, and next 45 days. If your baseline date is inside this window, earlier rows are back-calculated for context.", style="Subtitle.TLabel").pack(anchor="w", pady=(5, 10))
+        ttk.Label(forecast, text="Cashflow timeline", style="CardHeading.TLabel").pack(anchor="w")
+        ttk.Label(forecast, text="Last 14 days, today, and next 45 days. If your baseline date is inside this window, earlier rows are back-calculated for context.", style="CardText.TLabel").pack(anchor="w", pady=(5, 10))
         self.upcoming_tree = self.tree(forecast, ("Date", "Type", "Name", "Amount", "Running cash"), (115, 150, 520, 130, 140))
         self.upcoming_tree.pack(fill="both", expand=True)
-        self.upcoming_tree.tag_configure("income", background="#eaf7ef")
-        self.upcoming_tree.tag_configure("outflow", background="#fdecec")
-        self.upcoming_tree.tag_configure("neutral", background="#f7f8fa")
+        self.upcoming_tree.tag_configure("income", background=SOFT_GREEN)
+        self.upcoming_tree.tag_configure("outflow", background=SOFT_RED)
+        self.upcoming_tree.tag_configure("neutral", background="#f8fafc")
         self.upcoming_tree.bind("<MouseWheel>", self.scroll_tree)
         forecast_buttons = ttk.Frame(forecast, style="Card.TFrame")
         forecast_buttons.pack(fill="x", pady=(10, 0))
@@ -465,17 +494,14 @@ class LedgerApp(tk.Tk):
         ttk.Button(forecast_buttons, text="Clear selected amount", command=self.clear_upcoming_amount).pack(side="right", padx=(0, 8))
 
     def build_setup(self) -> None:
-        header = ttk.Frame(self.setup_tab)
-        header.pack(fill="x", pady=(0, 14))
-        ttk.Label(header, text="Setup", style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text="Set up recurring income and monthly bills. Use the Debt tab for credit cards and loans.", style="Subtitle.TLabel").pack(side="left", padx=14, pady=7)
+        self.hero_panel(self.setup_tab, "Bills + Income", "Set up recurring income and monthly bills. Use the Debt tab for credit cards and loans.")
         guide = ttk.Frame(self.setup_tab, style="Card.TFrame", padding=(14, 10))
         guide.pack(fill="x", pady=(0, 14))
-        ttk.Label(guide, text="HOW TO USE SETUP", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(guide, text="How to use this page", style="CardHeading.TLabel").pack(anchor="w")
         ttk.Label(
             guide,
             text="1) Income = paychecks.  2) Bills = monthly obligations; choose whether each leaves checking or is paid on a card.  3) Debt tab = credit cards, available room, and personal loan payments.",
-            style="Subtitle.TLabel",
+            style="CardText.TLabel",
             wraplength=1050,
             justify="left",
         ).pack(anchor="w", pady=(6, 0))
@@ -485,30 +511,27 @@ class LedgerApp(tk.Tk):
         income_frame = ttk.Frame(panes, style="Card.TFrame", padding=14)
         panes.add(bill_frame, weight=3); panes.add(income_frame, weight=2)
         self.section_title(bill_frame, "Bills / monthly obligations", "Add bill", self.bill_dialog)
-        ttk.Label(bill_frame, text="Shared-checking/ACH bills affect cashflow. Bills paid by card stay visible in Insights but do not leave checking until the card payment.", style="Subtitle.TLabel").pack(anchor="w", pady=(8, 0))
+        ttk.Label(bill_frame, text="Shared-checking/ACH bills affect cashflow. Bills paid by card stay visible in Insights but do not leave checking until the card payment.", style="CardText.TLabel").pack(anchor="w", pady=(8, 0))
         self.bill_tree = self.tree(bill_frame, ("Name", "Due", "Category", "Payment method", "Card used", "Amount"), (180, 65, 95, 155, 130, 95))
         self.bill_tree.pack(fill="both", expand=True, pady=(10, 8))
         self.bill_tree.bind("<Double-1>", lambda _: self.edit_bill())
         self.action_buttons(bill_frame, self.edit_bill, self.delete_bill)
         self.section_title(income_frame, "Income / paychecks", "Add income", self.income_dialog)
-        ttk.Label(income_frame, text="Income is counted on its scheduled pay date, not before it lands.", style="Subtitle.TLabel").pack(anchor="w", pady=(8, 0))
+        ttk.Label(income_frame, text="Income is counted on its scheduled pay date, not before it lands.", style="CardText.TLabel").pack(anchor="w", pady=(8, 0))
         self.income_tree = self.tree(income_frame, ("Name", "Frequency", "Pay day", "Amount"), (150, 90, 70, 100))
         self.income_tree.pack(fill="both", expand=True, pady=(10, 8))
         self.income_tree.bind("<Double-1>", lambda _: self.edit_income())
         self.action_buttons(income_frame, self.edit_income, self.delete_income)
     def build_debt(self) -> None:
-        header = ttk.Frame(self.debt_tab)
-        header.pack(fill="x", pady=(0, 14))
-        ttk.Label(header, text="Debt", style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text="Track the card you spend on, available room, and loan payoff payments from checking.", style="Subtitle.TLabel").pack(side="left", padx=14, pady=7)
+        self.hero_panel(self.debt_tab, "Debt", "Track the card you spend on, available room, and loan payoff payments from checking.")
 
         guide = ttk.Frame(self.debt_tab, style="Card.TFrame", padding=(14, 10))
         guide.pack(fill="x", pady=(0, 14))
-        ttk.Label(guide, text="HOW DEBT FITS CASHFLOW", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(guide, text="How debt fits cashflow", style="CardHeading.TLabel").pack(anchor="w")
         ttk.Label(
             guide,
             text="Credit-card purchases affect card room now. The checking account only changes when you make the card payment. Personal loan payments are fixed checking outflows on their due date.",
-            style="Subtitle.TLabel",
+            style="CardText.TLabel",
             wraplength=1050,
             justify="left",
         ).pack(anchor="w", pady=(6, 0))
@@ -517,35 +540,35 @@ class LedgerApp(tk.Tk):
         card_frame.pack(fill="x", pady=(0, 14))
         card_header = ttk.Frame(card_frame, style="Card.TFrame")
         card_header.pack(fill="x")
-        ttk.Label(card_header, text="Credit cards / spending cards", style="CardTitle.TLabel").pack(side="left")
+        ttk.Label(card_header, text="Credit cards / spending cards", style="CardHeading.TLabel").pack(side="left")
         ttk.Button(card_header, text="+ Add card", style="Accent.TButton", command=self.card_dialog).pack(side="right")
         ttk.Button(card_header, text="Edit selected card", command=self.edit_card).pack(side="right", padx=(0, 8))
         ttk.Button(card_header, text="Delete selected card", command=self.delete_card).pack(side="right", padx=(0, 8))
         self.cc_tree = self.tree(card_frame, ("Card", "Tracked balance", "Available", "Limit", "APR", "Min. payment", "Due"), (180, 120, 100, 100, 75, 105, 65))
         self.cc_tree.pack(fill="x", pady=(10, 8))
         self.cc_tree.bind("<Double-1>", lambda _: self.edit_card())
-        ttk.Label(card_frame, text="Use this for the card you plan to spend on and pay back monthly. The app tracks balance pressure and available room.", style="Subtitle.TLabel").pack(anchor="w")
+        ttk.Label(card_frame, text="Use this for the card you plan to spend on and pay back monthly. The app tracks balance pressure and available room.", style="CardText.TLabel").pack(anchor="w")
 
         loan_frame = ttk.Frame(self.debt_tab, style="Card.TFrame", padding=14)
         loan_frame.pack(fill="x")
         loan_header = ttk.Frame(loan_frame, style="Card.TFrame")
         loan_header.pack(fill="x")
-        ttk.Label(loan_header, text="Loans / debt payoff", style="CardTitle.TLabel").pack(side="left")
+        ttk.Label(loan_header, text="Loans / debt payoff", style="CardHeading.TLabel").pack(side="left")
         ttk.Button(loan_header, text="+ Add loan", style="Accent.TButton", command=self.loan_dialog).pack(side="right")
         ttk.Button(loan_header, text="Edit selected loan", command=self.edit_loan).pack(side="right", padx=(0, 8))
         ttk.Button(loan_header, text="Delete selected loan", command=self.delete_loan).pack(side="right", padx=(0, 8))
         self.loan_tree = self.tree(loan_frame, ("Loan", "Lender", "Balance", "APR", "Payment", "Due"), (190, 170, 120, 80, 110, 70))
         self.loan_tree.pack(fill="x", pady=(10, 8))
         self.loan_tree.bind("<Double-1>", lambda _: self.edit_loan())
-        ttk.Label(loan_frame, text="Use this for the personal loan replacing card debt. Loan payments show in Cashflow as checking outflows.", style="Subtitle.TLabel").pack(anchor="w")
+        ttk.Label(loan_frame, text="Use this for the personal loan replacing card debt. Loan payments show in Cashflow as checking outflows.", style="CardText.TLabel").pack(anchor="w")
 
     def build_spending(self) -> None:
-        top = ttk.Frame(self.spending_tab)
-        top.pack(fill="x")
-        ttk.Label(top, text="Spending", style="Title.TLabel").pack(side="left")
+        top = ttk.Frame(self.spending_tab, style="Hero.TFrame", padding=(22, 18))
+        top.pack(fill="x", pady=(0, 18))
+        ttk.Label(top, text="Spending", style="HeroTitle.TLabel").pack(side="left")
         ttk.Button(top, text="Import bank PDF", command=self.import_pdf).pack(side="right", padx=(8, 0))
         ttk.Button(top, text="Import bank CSV", style="Accent.TButton", command=self.import_csv).pack(side="right")
-        ttk.Label(self.spending_tab, text="Two lanes: checking transactions change cashflow; card purchases track spending/available room until you pay the card from checking.", style="Subtitle.TLabel").pack(anchor="w", pady=(6, 16))
+        ttk.Label(top, text="Two lanes: checking changes cashflow; card purchases track spending and available room until you pay the card.", style="HeroSubtitle.TLabel", wraplength=760).pack(side="left", padx=(18, 0), pady=8)
 
         panes = ttk.Panedwindow(self.spending_tab, orient="horizontal")
         panes.pack(fill="both", expand=True)
@@ -555,7 +578,7 @@ class LedgerApp(tk.Tk):
         panes.add(cc_frame, weight=3)
 
         self.section_title(bank_frame, "Checking / cashflow transactions", "Add checking transaction", self.transaction_dialog)
-        ttk.Label(bank_frame, text="Use this for shared-checking activity: cash withdrawals, card paybacks, manual spending, and extra money in.", style="Subtitle.TLabel").pack(anchor="w", pady=(8, 0))
+        ttk.Label(bank_frame, text="Use this for shared-checking activity: cash withdrawals, card paybacks, manual spending, and extra money in.", style="CardText.TLabel").pack(anchor="w", pady=(8, 0))
         self.transaction_tree = self.tree(bank_frame, ("Date", "Account", "Description", "Category", "Card paid", "Amount", "Source"), (105, 130, 220, 135, 130, 95, 110))
         self.transaction_tree.pack(fill="both", expand=True, pady=(10, 8))
         self.transaction_tree.bind("<Double-1>", lambda _: self.edit_transaction())
@@ -566,7 +589,7 @@ class LedgerApp(tk.Tk):
         ttk.Button(bank_buttons, text="Delete selected", command=self.delete_transaction).pack(side="right")
 
         self.section_title(cc_frame, "Purchase tracker", "Add purchase", self.cc_spending_dialog)
-        ttk.Label(cc_frame, text="Use this for groceries, gas, food, bills paid by card, and other spending. Pick the card or checking account used.", style="Subtitle.TLabel").pack(anchor="w", pady=(8, 0))
+        ttk.Label(cc_frame, text="Use this for groceries, gas, food, bills paid by card, and other spending. Pick the card or checking account used.", style="CardText.TLabel").pack(anchor="w", pady=(8, 0))
         self.cc_spend_tree = self.tree(cc_frame, ("Date", "Account", "Description", "Category", "Amount", "Cashflow?"), (95, 160, 220, 130, 95, 85))
         self.cc_spend_tree.pack(fill="both", expand=True, pady=(10, 8))
         self.cc_spend_tree.bind("<Double-1>", lambda _: self.edit_spending())
@@ -576,22 +599,22 @@ class LedgerApp(tk.Tk):
         ttk.Button(cc_buttons, text="Delete selected", command=self.delete_spending).pack(side="right")
 
     def build_insights(self) -> None:
-        controls = ttk.Frame(self.data_tab)
-        controls.pack(fill="x", pady=(0, 12))
-        ttk.Label(controls, text="Spending insights", style="Title.TLabel").pack(side="left")
+        controls = ttk.Frame(self.data_tab, style="Hero.TFrame", padding=(22, 16))
+        controls.pack(fill="x", pady=(0, 14))
+        ttk.Label(controls, text="Insights", style="HeroTitle.TLabel").pack(side="left")
         self.month_var = tk.StringVar(value=date.today().strftime("%Y-%m"))
         self.insight_month_choice = tk.StringVar(value=f"{date.today().month:02d}")
         self.insight_year_choice = tk.StringVar(value=str(date.today().year))
         self.insight_view_var = tk.StringVar(value="Full monthly obligations + spending")
         self.insight_category_var = tk.StringVar(value="All categories")
-        ttk.Label(controls, text="Month:").pack(side="right", padx=(12, 4))
+        ttk.Label(controls, text="Month:", style="HeroSubtitle.TLabel").pack(side="right", padx=(12, 4))
         ttk.Combobox(controls, textvariable=self.insight_month_choice, values=tuple(f"{n:02d}" for n in range(1, 13)), state="readonly", width=5).pack(side="right")
-        ttk.Label(controls, text="Year:").pack(side="right", padx=(12, 4))
+        ttk.Label(controls, text="Year:", style="HeroSubtitle.TLabel").pack(side="right", padx=(12, 4))
         ttk.Combobox(controls, textvariable=self.insight_year_choice, values=tuple(str(date.today().year + offset) for offset in range(-3, 3)), state="readonly", width=7).pack(side="right")
-        ttk.Label(controls, text="Category:").pack(side="right", padx=(12, 4))
+        ttk.Label(controls, text="Category:", style="HeroSubtitle.TLabel").pack(side="right", padx=(12, 4))
         self.insight_category_choice = ttk.Combobox(controls, textvariable=self.insight_category_var, values=("All categories",), state="readonly", width=20)
         self.insight_category_choice.pack(side="right")
-        ttk.Label(controls, text="View:").pack(side="right", padx=(12, 4))
+        ttk.Label(controls, text="View:", style="HeroSubtitle.TLabel").pack(side="right", padx=(12, 4))
         ttk.Combobox(
             controls,
             textvariable=self.insight_view_var,
@@ -621,7 +644,7 @@ class LedgerApp(tk.Tk):
         self.card(summary, "Average item", self.insight_avg, 3)
         chart_card = ttk.Frame(self.data_tab, style="Card.TFrame", padding=16)
         chart_card.pack(fill="both", expand=True)
-        ttk.Label(chart_card, text="Spending by category", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(chart_card, text="Spending by category", style="CardHeading.TLabel").pack(anchor="w")
         self.chart = tk.Canvas(chart_card, background="#ffffff", highlightthickness=0)
         self.chart.pack(fill="both", expand=True, pady=(10, 0))
         self.chart.bind("<Configure>", lambda _: self.draw_chart())
@@ -782,7 +805,7 @@ class LedgerApp(tk.Tk):
     def section_title(self, parent, title, button, action) -> None:
         row = ttk.Frame(parent, style="Card.TFrame")
         row.pack(fill="x")
-        ttk.Label(row, text=title, style="CardTitle.TLabel").pack(side="left")
+        ttk.Label(row, text=title, style="CardHeading.TLabel").pack(side="left")
         ttk.Button(row, text=f"+ {button}", style="Accent.TButton", command=action).pack(side="right")
 
     def tree(self, parent, cols, widths):
@@ -2057,40 +2080,42 @@ class LedgerApp(tk.Tk):
         self.draw_chart()
     def draw_chart(self):
         canvas=self.chart; canvas.delete("all"); rows=getattr(self,"chart_data",[]); details=getattr(self,"insight_details",[])
-        w=max(canvas.winfo_width(),650); h=max(canvas.winfo_height(),350)
+        w=max(canvas.winfo_width(),760); h=max(canvas.winfo_height(),420)
         if not rows:
-            canvas.create_text(w/2,h/2,text="No spending data for this month yet.",fill="#748198",font=("Segoe UI",12))
+            canvas.create_text(w/2,h/2,text="No spending data for this month yet.",fill=MUTED,font=("Segoe UI",12))
             return
         by_category={}
         for detail in details:
             by_category.setdefault(detail["category"],[]).append(detail)
         maximum=max(r["total"] for r in rows) or 1
-        y=24; usable=w-260
-        colors=("#2a9d96","#74b7b2","#a7d8d4","#d8eeec")
-        for r in rows[:8]:
+        y=24; usable=max(260,w-300)
+        colors=(BLUE,TEAL,"#8b5cf6","#f59e0b","#06b6d4","#ef4444","#22c55e","#64748b")
+        for cat_index,r in enumerate(rows[:8]):
             category=r["category"]; total=r["total"]
-            canvas.create_text(14,y,text=category,anchor="w",fill="#25324a",font=("Segoe UI Semibold",11))
-            canvas.create_text(w-14,y,text=money(total),anchor="e",fill="#25324a",font=("Segoe UI Semibold",11))
-            y+=16
-            length=(total/maximum)*usable
-            canvas.create_rectangle(14,y,14+length,y+16,fill="#2a9d96",width=0)
-            canvas.create_rectangle(14+length,y,14+usable,y+16,fill="#eef3f7",width=0)
-            y+=24
             category_details=by_category.get(category,[])[:5]
+            block_height=74 + len(category_details)*22
+            canvas.create_rectangle(24,y,w-24,y+block_height,fill="#f8fafc",outline="#e2e8f0")
+            canvas.create_text(40,y+19,text=category,anchor="w",fill=INK,font=("Segoe UI Semibold",12))
+            canvas.create_text(w-40,y+19,text=money(total),anchor="e",fill=INK,font=("Segoe UI Semibold",12))
+            y+=36
+            length=(total/maximum)*usable
+            canvas.create_rectangle(40,y,40+usable,y+14,fill="#e2e8f0",width=0)
+            canvas.create_rectangle(40,y,40+length,y+14,fill=colors[cat_index % len(colors)],width=0)
+            y+=26
             if not category_details:
                 y+=10
                 continue
             detail_max=max(d["total"] for d in category_details) or 1
             for idx,d in enumerate(category_details):
-                desc=d["description"][:42] + ("..." if len(d["description"]) > 42 else "")
+                desc=d["description"][:44] + ("..." if len(d["description"]) > 44 else "")
                 source=f"{d['source']} • {d['count']}x"
-                canvas.create_text(34,y+8,text=desc,anchor="w",fill="#40516d",font=("Segoe UI",9))
-                canvas.create_text(330,y+8,text=source,anchor="w",fill="#748198",font=("Segoe UI",8))
-                mini=(d["total"]/detail_max)*max(80,usable-450)
-                canvas.create_rectangle(445,y+3,445+mini,y+13,fill=colors[idx % len(colors)],width=0)
-                canvas.create_text(w-14,y+8,text=money(d["total"]),anchor="e",fill="#40516d",font=("Segoe UI",9))
-                y+=20
-            y+=16
+                canvas.create_text(52,y+8,text=desc,anchor="w",fill="#334155",font=("Segoe UI",9))
+                canvas.create_text(360,y+8,text=source[:45],anchor="w",fill=MUTED,font=("Segoe UI",8))
+                mini=(d["total"]/detail_max)*max(90,usable-470)
+                canvas.create_rectangle(550,y+3,550+mini,y+13,fill=colors[(idx+1) % len(colors)],width=0)
+                canvas.create_text(w-40,y+8,text=money(d["total"]),anchor="e",fill="#334155",font=("Segoe UI",9))
+                y+=22
+            y+=18
 
 
 if __name__ == "__main__":

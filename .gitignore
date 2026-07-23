@@ -8,6 +8,10 @@ build_release_current/
 dist_release_current/
 build_release_v*/
 dist_release_v*/
+build_qt_preview/
+dist_qt_preview/
+build_qt_v*/
+dist_qt_v*/
 *.spec
 .venv/
 .tmp_profile/

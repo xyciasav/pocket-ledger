@@ -57,6 +57,28 @@ Then double-click `app.py`, or run:
 py app.py
 ```
 
+## Qt preview
+
+The modern UI migration lives beside the original Tkinter app in `app_qt.py`. It uses the same local SQLite database at `%USERPROFILE%\PocketLedger\budget.db`, so the existing data model is preserved while the interface is rebuilt.
+
+Install dependencies:
+
+```powershell
+py -m pip install -r requirements.txt
+```
+
+Run the Qt preview:
+
+```powershell
+py app_qt.py
+```
+
+Quick non-interactive smoke test:
+
+```powershell
+py app_qt.py --self-test-qt
+```
+
 ## Build the EXE
 
 Double-click `build_exe.bat`. The resulting app is at `dist\Pocket Ledger\Pocket Ledger.exe`.
