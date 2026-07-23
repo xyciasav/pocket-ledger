@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.28"
+APP_VERSION = "0.2.29"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -1011,18 +1011,15 @@ class PocketLedgerQt(QMainWindow):
 
         future_timeline = self.upcoming_events(bills, income, cards, loans, transactions, cash_today, today + timedelta(days=1), today + timedelta(days=60))
         future_timeline.insert(0, {"id": 0, "date": today.isoformat(), "kind": "Today", "name": "Current cash", "amount": 0, "running": cash_today})
-        timeline_start = max(change_start, today - timedelta(days=21))
-        timeline_start_cash = float(cash["starting_balance"] or 0)
-        if timeline_start > change_start:
-            before_timeline = timeline_start - timedelta(days=1)
-            timeline_start_cash += self.scheduled_income_between(income, change_start, before_timeline)
-            timeline_start_cash += sum(row["amount"] for row in transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= before_timeline)
-            timeline_start_cash -= self.scheduled_checking_outflow_between(bills, cards, loans, change_start, before_timeline)
-            timeline_start_cash -= self.transaction_total_between(transactions, change_start, before_timeline)
-        detailed_timeline = self.upcoming_events(bills, income, cards, loans, transactions, timeline_start_cash, timeline_start, today + timedelta(days=60))
-        detailed_timeline.insert(0, {"id": 0, "date": timeline_start.isoformat(), "kind": "Lookback start", "name": "Running cash from reset", "amount": 0, "running": timeline_start_cash})
+        lookback_start = today - timedelta(days=60)
+        historical_events = [
+            {"id": -(idx + 2), "date": d.isoformat(), "kind": kind, "name": name, "amount": amount, "running": None}
+            for idx, (d, kind, name, amount) in enumerate(self.cashflow_event_rows(bills, income, cards, loans, transactions, lookback_start, start_date))
+        ]
+        detailed_timeline = historical_events + self.upcoming_events(bills, income, cards, loans, transactions, float(cash["starting_balance"] or 0), change_start, today + timedelta(days=60))
+        detailed_timeline.insert(0, {"id": 0, "date": start_date.isoformat(), "kind": "Cash reset", "name": f"{cash['name']} reset point", "amount": 0, "running": float(cash["starting_balance"] or 0)})
         detailed_timeline.append({"id": -1, "date": today.isoformat(), "kind": "Today", "name": "Current cash", "amount": 0, "running": cash_today})
-        self.set_table(self.cashflow_table, detailed_timeline, lambda r: (r["date"], r["kind"], r["name"], signed_money(r["amount"]), money(r["running"])))
+        self.set_table(self.cashflow_table, detailed_timeline, lambda r: (r["date"], r["kind"], r["name"], signed_money(r["amount"]), money(r["running"]) if r["running"] is not None else "— before reset"))
         self.cashflow_table.sortItems(0, Qt.AscendingOrder)
         self.color_cashflow_table()
         self.refresh_cashflow_summary(future_timeline, cash_today)
@@ -1414,7 +1411,7 @@ class PocketLedgerQt(QMainWindow):
                 total += -float(row["amount"] or 0) if row["category"] == EXTRA_INCOME_CATEGORY else float(row["amount"] or 0)
         return total
 
-    def upcoming_events(self, bills, income, cards, loans, transactions, start_cash: float, start: date, end: date) -> list[dict]:
+    def cashflow_event_rows(self, bills, income, cards, loans, transactions, start: date, end: date) -> list[tuple[date, str, str, float]]:
         events = []
         for row in income:
             for d in self.dates_between(row["pay_day"], start, end):
@@ -1435,6 +1432,10 @@ class PocketLedgerQt(QMainWindow):
                 amount = float(row["amount"] or 0) if row["category"] == EXTRA_INCOME_CATEGORY else -float(row["amount"] or 0)
                 events.append((d, "Extra income" if amount > 0 else "Spending", row["description"], amount))
         events.sort(key=lambda item: (item[0], 0 if item[3] > 0 else 1, item[2]))
+        return events
+
+    def upcoming_events(self, bills, income, cards, loans, transactions, start_cash: float, start: date, end: date) -> list[dict]:
+        events = self.cashflow_event_rows(bills, income, cards, loans, transactions, start, end)
         running = start_cash
         rows = []
         for idx, (d, kind, name, amount) in enumerate(events):
