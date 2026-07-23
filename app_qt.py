@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.3"
+APP_VERSION = "0.2.4"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -1138,6 +1138,21 @@ QComboBox#ledgerCombo { background: #ffffff; color: #0f172a; min-height: 22px; }
 QComboBox QAbstractItemView {
     background: #ffffff; color: #0f172a; selection-background-color: #dbeafe;
     selection-color: #0f172a; border: 1px solid #cbd5e1; outline: 0;
+}
+QDialog, QMessageBox {
+    background: #ffffff; color: #0f172a;
+}
+QDialog QLabel, QMessageBox QLabel {
+    color: #0f172a;
+}
+QDialog QLineEdit, QDialog QDateEdit, QDialog QSpinBox, QDialog QDoubleSpinBox, QDialog QComboBox {
+    background: #ffffff; color: #0f172a; border: 1px solid #cbd5e1;
+}
+QDialogButtonBox QPushButton, QMessageBox QPushButton {
+    min-width: 72px; background: #e2e8f0; color: #0f172a;
+}
+QMessageBox {
+    messagebox-text-interaction-flags: 5;
 }
 QPushButton {
     background: #e2e8f0; border: none; border-radius: 9px; padding: 9px 14px;
