@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.8"
+APP_VERSION = "0.2.9"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -552,7 +552,7 @@ class PocketLedgerQt(QMainWindow):
 
     def debt_page(self) -> QWidget:
         page, layout = self.shell("Debt", "Cards track available room. Loans track fixed payoff payments from checking.")
-        self.cards_table = self.table(("Card", "Tracked balance", "Available", "Limit", "APR", "Payment", "Due"))
+        self.cards_table = self.table(("Card", "Current balance", "Available", "Limit", "APR", "Payment", "Due"))
         self.loans_table = self.table(("Loan", "Lender", "Remaining", "Balance", "Extra paid", "APR", "Payment", "Due"))
         layout.addWidget(self.entity_card("Credit cards / spending cards", self.cards_table, self.add_card, self.edit_card, self.delete_card))
         layout.addWidget(self.entity_card("Loans / debt payoff", self.loans_table, self.add_loan, self.edit_loan, self.delete_loan))
@@ -811,17 +811,9 @@ class PocketLedgerQt(QMainWindow):
         actual_spending = self.transaction_total_between(transactions, change_start, today)
         extra_income = sum(row["amount"] for row in transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
         cash_today = float(cash["starting_balance"] or 0) + income_received + extra_income - due_outflow - actual_spending
-        card_totals = {row["id"]: 0.0 for row in cards}
-        for row in spending:
-            if row["card_id"] in card_totals:
-                card_totals[row["card_id"]] += float(row["amount"] or 0)
-        payments = {row["id"]: 0.0 for row in cards}
-        for row in transactions:
-            if row["category"] == "Credit Card Payment" and row["related_card_id"] in payments:
-                payments[row["related_card_id"]] += float(row["amount"] or 0)
-        tracked = {card["id"]: float(card["balance"] or 0) + card_totals.get(card["id"], 0) - payments.get(card["id"], 0) for card in cards}
-        card_debt = sum(tracked.values())
-        card_room = sum(float(card["credit_limit"] or 0) - tracked.get(card["id"], 0) for card in cards)
+        card_balances = {card["id"]: float(card["balance"] or 0) for card in cards}
+        card_debt = sum(card_balances.values())
+        card_room = sum(float(card["credit_limit"] or 0) - card_balances.get(card["id"], 0) for card in cards)
         loan_debt = sum(self.loan_remaining(row) for row in loans)
 
         for i in reversed(range(self.metric_grid.count())):
@@ -830,7 +822,7 @@ class PocketLedgerQt(QMainWindow):
                 widget.setParent(None)
         metrics = (
             Metric("Checking today", money(cash_today), "Cash after baseline, landed income, checking outflows, and manual spending.", "teal"),
-            Metric("Card debt / room", f"{money(card_debt)} / {money(card_room)}", "Card pressure and available room.", "blue"),
+            Metric("Card debt / room", f"{money(card_debt)} / {money(card_room)}", "Current card balances and available room. Spending rows are for tracking, not debt math.", "blue"),
             Metric("Loans balance", money(loan_debt), "Mortgages, personal loans, and other fixed payoff balances.", "slate"),
             Metric("Income after baseline", money(income_received), "Only counted after its pay date.", "blue"),
             Metric("Due from checking", money(due_outflow), "ACH bills, card minimums, and loan payments.", "slate"),
@@ -840,13 +832,13 @@ class PocketLedgerQt(QMainWindow):
             self.metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
         self.account_label.setText(
             f"{cash['name']} baseline: {money(cash['starting_balance'])} as of {cash['start_date']}. "
-            "Card purchases pressure card room first; checking changes when you pay the card. "
+            "Card balances are set on the Debt page; purchase rows are for tracking and insights. "
             "Loan payments are scheduled checking outflows."
         )
         card_names = {row["id"]: row["name"] for row in cards}
         self.set_table(self.bills_table, bills, lambda r: (r["name"], r["due_day"], r["category"], r["paid_from"], card_names.get(r["related_card_id"], "—"), money(r["amount"])))
         self.set_table(self.income_table, income, lambda r: (r["name"], r["frequency"], r["pay_day"] or "—", money(r["amount"])))
-        self.set_table(self.cards_table, cards, lambda r: (r["name"], money(tracked.get(r["id"], 0)), money(float(r["credit_limit"] or 0)-tracked.get(r["id"], 0)), money(r["credit_limit"]), f"{r['apr']:.2f}%", money(r["minimum_payment"]), r["due_day"] or "—"))
+        self.set_table(self.cards_table, cards, lambda r: (r["name"], money(card_balances.get(r["id"], 0)), money(float(r["credit_limit"] or 0)-card_balances.get(r["id"], 0)), money(r["credit_limit"]), f"{r['apr']:.2f}%", money(r["minimum_payment"]), r["due_day"] or "—"))
         self.set_table(self.loans_table, loans, lambda r: (r["name"], r["lender"], money(self.loan_remaining(r)), money(r["balance"]), money(r["extra_payment"]), f"{r['apr']:.2f}%", money(r["payment"]), r["due_day"] or "—"))
         self.set_table(self.transactions_table, transactions, lambda r: (r["trans_date"], r["account_name"], r["description"], r["category"], r["related_card_name"] or "—", money(r["amount"])))
         self.set_table(self.spending_table, spending, lambda r: (r["spend_date"], r["card_name"], r["description"], r["category"], money(r["amount"]), "No"))
