@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.15"
+APP_VERSION = "0.2.16"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -402,8 +402,8 @@ class PocketLedgerQt(QMainWindow):
         self.store = Store()
         self.ledger_id = self.store.active_ledger_id()
         self.setWindowTitle(f"Pocket Ledger Qt Preview {APP_VERSION}")
-        self.resize(1680, 1000)
-        self.setMinimumSize(1280, 780)
+        self.resize(1800, 1050)
+        self.setMinimumSize(1400, 820)
         self.nav_buttons: list[QPushButton] = []
         self.pages = QStackedWidget()
         self.ledger_combo = QComboBox()
@@ -422,6 +422,10 @@ class PocketLedgerQt(QMainWindow):
         self.setup_summary = QLabel()
         self.bill_breakdown_bars = BarsWidget()
         self.income_breakdown_bars = BarsWidget()
+        self.debt_metric_grid = QGridLayout()
+        self.debt_summary = QLabel()
+        self.card_debt_bars = BarsWidget()
+        self.loan_debt_bars = BarsWidget()
         self.update_status = QLabel("Not checked yet.")
         self._build()
         self.refresh_all()
@@ -575,7 +579,16 @@ class PocketLedgerQt(QMainWindow):
         return page
 
     def debt_page(self) -> QWidget:
-        page, layout = self.shell("Debt", "Cards track available room. Loans track fixed payoff payments from checking.")
+        page, layout = self.shell("Debt", "Current card balances, available room, and loan/mortgage payment pressure.")
+        self.debt_metric_grid.setSpacing(14)
+        layout.addLayout(self.debt_metric_grid)
+        self.debt_summary.setObjectName("cardText")
+        self.debt_summary.setWordWrap(True)
+        layout.addWidget(self.card_frame("Debt plan", self.debt_summary))
+        chart_row = QHBoxLayout()
+        chart_row.addWidget(self.card_frame("Credit card room", self.card_debt_bars), 1)
+        chart_row.addWidget(self.card_frame("Loans / mortgages", self.loan_debt_bars), 1)
+        layout.addLayout(chart_row)
         self.cards_table = self.table(("Card", "Current balance", "Available", "Limit", "APR", "Payment", "Due"))
         self.loans_table = self.table(("Loan", "Lender", "Remaining", "Balance", "Extra paid", "APR", "Payment", "Due"))
         layout.addWidget(self.entity_card("Credit cards / spending cards", self.cards_table, self.add_card, self.edit_card, self.delete_card))
@@ -866,6 +879,7 @@ class PocketLedgerQt(QMainWindow):
         self.refresh_setup_summary(bills, income, cards, loans, today)
         self.set_table(self.cards_table, cards, lambda r: (r["name"], money(card_balances.get(r["id"], 0)), money(float(r["credit_limit"] or 0)-card_balances.get(r["id"], 0)), money(r["credit_limit"]), f"{r['apr']:.2f}%", money(r["minimum_payment"]), r["due_day"] or "—"))
         self.set_table(self.loans_table, loans, lambda r: (r["name"], r["lender"], money(self.loan_remaining(r)), money(r["balance"]), money(r["extra_payment"]), f"{r['apr']:.2f}%", money(r["payment"]), r["due_day"] or "—"))
+        self.refresh_debt_summary(cards, loans)
         self.set_table(self.transactions_table, transactions, lambda r: (r["trans_date"], r["account_name"], r["description"], r["category"], r["related_card_name"] or "—", money(r["amount"])))
         self.set_table(self.spending_table, spending, lambda r: (r["spend_date"], r["card_name"], r["description"], r["category"], money(r["amount"]), "No"))
 
@@ -950,6 +964,56 @@ class PocketLedgerQt(QMainWindow):
         for idx, metric in enumerate(metrics):
             self.spending_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
 
+    def refresh_debt_summary(self, cards, loans) -> None:
+        card_balance = sum(float(row["balance"] or 0) for row in cards)
+        card_limit = sum(float(row["credit_limit"] or 0) for row in cards)
+        card_room = card_limit - card_balance
+        card_minimums = sum(float(row["minimum_payment"] or 0) for row in cards)
+        loan_remaining = sum(self.loan_remaining(row) for row in loans)
+        loan_payments = sum(float(row["payment"] or 0) for row in loans)
+        highest_apr_card = max(cards, key=lambda row: float(row["apr"] or 0), default=None)
+        for i in reversed(range(self.debt_metric_grid.count())):
+            widget = self.debt_metric_grid.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        metrics = (
+            Metric("Card balance", money(card_balance), "Current balances you entered on credit cards.", "blue"),
+            Metric("Card room", money(card_room), f"Available out of {money(card_limit)} total limits.", "teal" if card_room >= 0 else "slate"),
+            Metric("Card minimums", money(card_minimums), "Scheduled minimum payments from all cards.", "slate"),
+            Metric("Loans / mortgages", money(loan_remaining), "Remaining balances after extra paid amounts.", "slate"),
+            Metric("Loan payments", money(loan_payments), "Monthly payments scheduled from Debt.", "blue"),
+            Metric("Highest APR", f"{float(highest_apr_card['apr'] or 0):.2f}%" if highest_apr_card else "—", highest_apr_card["name"] if highest_apr_card else "No cards added.", "slate"),
+        )
+        for idx, metric in enumerate(metrics):
+            self.debt_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
+        self.debt_summary.setText(
+            "Debt is the source of truth for current credit card balances, card minimums, and loan/mortgage payments. "
+            "Card purchases on the Spending page are for tracking and insights; they do not change current card balance here."
+        )
+        palette = ["#2563eb", "#0f766e", "#8b5cf6", "#f59e0b", "#06b6d4", "#ef4444", "#22c55e"]
+        card_rows = []
+        for idx, row in enumerate(cards):
+            balance = float(row["balance"] or 0)
+            limit = float(row["credit_limit"] or 0)
+            available = limit - balance
+            card_rows.append((
+                row["name"],
+                max(0.0, available),
+                palette[idx % len(palette)],
+                [("Current balance", balance), ("Credit limit", limit), ("Minimum due", float(row["minimum_payment"] or 0))],
+            ))
+        loan_rows = []
+        for idx, row in enumerate(loans):
+            remaining = self.loan_remaining(row)
+            loan_rows.append((
+                row["name"],
+                remaining,
+                palette[idx % len(palette)],
+                [("Monthly payment", float(row["payment"] or 0)), ("Extra paid", float(row["extra_payment"] or 0)), ("Original balance", float(row["balance"] or 0))],
+            ))
+        self.card_debt_bars.set_rows(sorted(card_rows, key=lambda row: row[1], reverse=True))
+        self.loan_debt_bars.set_rows(sorted(loan_rows, key=lambda row: row[1], reverse=True))
+
     def refresh_setup_summary(self, bills, income, cards, loans, today: date) -> None:
         start = today.replace(day=1)
         end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
@@ -1022,8 +1086,9 @@ class PocketLedgerQt(QMainWindow):
             Metric("Debt payments", money(debt_payment_total), "Card minimums plus loans/mortgages from the Debt page.", "blue"),
             Metric("Next due", money(next_due[2]) if next_due else "—", f"{next_due[0]:%b %d} · {next_due[1]} · {next_due[3]}" if next_due else "No upcoming bill or debt payment found.", "slate"),
         )
-        for idx, metric in enumerate(metrics):
-            self.setup_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
+        positions = ((0, 0, 1, 1), (0, 1, 1, 1), (0, 2, 1, 1), (1, 0, 1, 1), (1, 1, 1, 1), (1, 2, 1, 1), (2, 0, 1, 3))
+        for metric, position in zip(metrics, positions):
+            self.setup_metric_grid.addWidget(MetricCard(metric), *position)
         next_income_text = f" Next income: {next_income[1]['name']} on {next_income[0]:%b %d} for {money(next_income[1]['amount'])}." if next_income else ""
         self.setup_summary.setText(
             f"This page is for recurring money and scheduled debt payments. Bank-paid bills and Debt-page payments flow into Cashflow; card-paid bills are tracked as obligations but checking moves when you pay the card. "
