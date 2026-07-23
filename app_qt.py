@@ -54,7 +54,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.21"
+APP_VERSION = "0.2.22"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -422,7 +422,6 @@ class PocketLedgerQt(QMainWindow):
         self.insight_source_bars = BarsWidget()
         self.insight_metric_grid = QGridLayout()
         self.insight_detail_table = None
-        self.llm_prompt = QTextEdit()
         self.llm_answer = QTextEdit()
         self.insight_month_start = date.today().replace(day=1)
         self.insight_month_label = QLabel()
@@ -655,21 +654,22 @@ class PocketLedgerQt(QMainWindow):
         llm_card.setObjectName("card")
         llm_layout = QVBoxLayout(llm_card)
         llm_layout.setContentsMargins(18, 16, 18, 18)
-        llm_title = QLabel("Ask local LLM")
+        llm_title = QLabel("Local AI rundown")
         llm_title.setObjectName("sectionTitle")
-        llm_hint = QLabel("Sends this month's summarized ledger data to your configured local endpoint. Default is Ollama on localhost.")
+        llm_hint = QLabel(
+            "One click sends the current month, debt, and upcoming cashflow forecast to your configured local/private model "
+            "and asks for a full budget rundown."
+        )
         llm_hint.setObjectName("cardText")
         llm_hint.setWordWrap(True)
-        self.llm_prompt.setPlaceholderText("Example: What spending stands out this month, and what should I watch before next payday?")
-        self.llm_prompt.setMinimumHeight(90)
         self.llm_answer.setReadOnly(True)
-        self.llm_answer.setMinimumHeight(180)
-        ask = QPushButton("Ask local LLM")
+        self.llm_answer.setMinimumHeight(260)
+        self.llm_answer.setPlaceholderText("Click Generate AI rundown to analyze current spending, bills, debt, and forecast.")
+        ask = QPushButton("Generate AI rundown")
         ask.setObjectName("primary")
         ask.clicked.connect(self.ask_local_llm)
         llm_layout.addWidget(llm_title)
         llm_layout.addWidget(llm_hint)
-        llm_layout.addWidget(self.llm_prompt)
         llm_layout.addWidget(ask, alignment=Qt.AlignRight)
         llm_layout.addWidget(self.llm_answer)
         layout.addWidget(llm_card)
@@ -1539,9 +1539,11 @@ class PocketLedgerQt(QMainWindow):
 
     def llm_month_summary(self) -> dict:
         cash, bills, income, cards, loans, transactions, spending = self.rows()
+        today = date.today()
         start = self.insight_month_start
         end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
         by_category: dict[str, float] = {}
+        by_account: dict[str, float] = {}
         purchases = []
         checking = []
         for row in spending:
@@ -1549,16 +1551,47 @@ class PocketLedgerQt(QMainWindow):
             if start <= d <= end:
                 amount = float(row["amount"] or 0)
                 by_category[row["category"]] = by_category.get(row["category"], 0) + amount
+                by_account[row["card_name"]] = by_account.get(row["card_name"], 0) + amount
                 purchases.append({"date": row["spend_date"], "account": row["card_name"], "description": row["description"], "category": row["category"], "amount": amount})
         for row in transactions:
             d = self.parse_date(row["trans_date"])
             if start <= d <= end:
                 amount = float(row["amount"] or 0)
                 checking.append({"date": row["trans_date"], "description": row["description"], "category": row["category"], "amount": amount})
+        start_date = self.parse_date(cash["start_date"])
+        change_start = start_date + timedelta(days=1)
+        income_received = self.scheduled_income_between(income, change_start, today)
+        due_outflow = self.scheduled_checking_outflow_between(bills, cards, loans, change_start, today)
+        actual_spending = self.transaction_total_between(transactions, change_start, today)
+        extra_income = sum(row["amount"] for row in transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
+        cash_today = float(cash["starting_balance"] or 0) + income_received + extra_income - due_outflow - actual_spending
+        timeline = self.upcoming_events(bills, income, cards, loans, transactions, cash_today, today + timedelta(days=1), today + timedelta(days=60))
+        room = self.spending_room_periods(bills, income, cards, loans, cash_today, today)
+        low_cash = min([cash_today] + [float(row["running"] or 0) for row in timeline]) if timeline else cash_today
+        next_income = next((row for row in timeline if float(row["amount"] or 0) > 0), None)
+        next_outflow = next((row for row in timeline if float(row["amount"] or 0) < 0), None)
         return {
             "month": f"{start:%B %Y}",
+            "today": today.isoformat(),
             "cash_account": dict(cash),
+            "cash_math": {
+                "cash_today": cash_today,
+                "baseline_date": cash["start_date"],
+                "baseline_balance": float(cash["starting_balance"] or 0),
+                "income_received_since_baseline": income_received,
+                "extra_income_since_baseline": extra_income,
+                "checking_outflow_since_baseline": due_outflow,
+                "manual_spending_since_baseline": actual_spending,
+            },
+            "forecast": {
+                "lowest_cash_next_60_days": low_cash,
+                "next_income": next_income,
+                "next_outflow": next_outflow,
+                "upcoming_events": timeline[:35],
+                "spending_room_periods": room,
+            },
             "spending_by_category": dict(sorted(by_category.items(), key=lambda item: item[1], reverse=True)),
+            "spending_by_account": dict(sorted(by_account.items(), key=lambda item: item[1], reverse=True)),
             "top_purchases": sorted(purchases, key=lambda row: row["amount"], reverse=True)[:25],
             "checking_activity": sorted(checking, key=lambda row: row["amount"], reverse=True)[:25],
             "recurring_bills": [{"name": row["name"], "category": row["category"], "paid_from": row["paid_from"], "amount": float(row["amount"] or 0), "due_day": row["due_day"]} for row in bills],
@@ -1573,13 +1606,20 @@ class PocketLedgerQt(QMainWindow):
         if not self.is_allowed_llm_endpoint(endpoint):
             QMessageBox.warning(self, "Local/private only", "The configured LLM endpoint is not localhost or a private LAN address. Open Settings and use a local/private endpoint first.")
             return
-        question = self.llm_prompt.toPlainText().strip() or "Analyze this month's spending and tell me what stands out, what risks I should watch, and 3 practical budget tips."
+        summary = self.llm_month_summary()
         prompt = (
-            "You are helping analyze a household budget. Be practical, concise, and call out cashflow or spending risks. "
-            "Use only the JSON data provided.\n\n"
-            f"Question: {question}\n\nLedger JSON:\n{json.dumps(self.llm_month_summary(), indent=2)}"
+            "You are a practical household budget analyst. Generate a full automatic rundown from the JSON ledger data. "
+            "Do not ask follow-up questions. Use only the data provided and clearly say when something is an estimate.\n\n"
+            "Report format:\n"
+            "1. Plain-English money snapshot: checking cash today, lowest forecast cash, next income, next outflow.\n"
+            "2. Current month spending breakdown: biggest categories, biggest purchases, account/card concentration.\n"
+            "3. Bills/debt pressure: recurring bills, card balances/room, loan or mortgage payments, high APR risks.\n"
+            "4. Forecast warnings: dates or periods that look tight, anything that could cause overdraft or maxed-card risk.\n"
+            "5. Recommended actions: 5 specific practical moves for the next 7-30 days.\n"
+            "6. Short summary sentence.\n\n"
+            f"Ledger JSON:\n{json.dumps(summary, indent=2)}"
         )
-        self.llm_answer.setPlainText("Asking local LLM...")
+        self.llm_answer.setPlainText("Generating local AI rundown...")
         QApplication.processEvents()
         try:
             if self.is_ollama_endpoint(endpoint):
