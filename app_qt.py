@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.12"
+APP_VERSION = "0.2.13"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -250,11 +250,13 @@ class MetricCard(QFrame):
 class BarsWidget(QWidget):
     def __init__(self):
         super().__init__()
-        self.rows: list[tuple[str, float, str]] = []
+        self.rows: list[tuple] = []
         self.setMinimumHeight(280)
 
-    def set_rows(self, rows: list[tuple[str, float, str]]) -> None:
+    def set_rows(self, rows: list[tuple]) -> None:
         self.rows = rows
+        line_count = sum(1 + min(5, len(row[3]) if len(row) > 3 else 0) for row in rows[:8])
+        self.setMinimumHeight(max(280, 48 + line_count * 30))
         self.update()
 
     def paintEvent(self, _event) -> None:
@@ -265,9 +267,11 @@ class BarsWidget(QWidget):
             painter.setPen(QColor("#64748b"))
             painter.drawText(self.rect(), Qt.AlignCenter, "No insight data yet.")
             return
-        max_value = max(value for _label, value, _color in self.rows) or 1
+        max_value = max(float(row[1] or 0) for row in self.rows) or 1
         y = 22
-        for label, value, color in self.rows[:9]:
+        for row in self.rows[:8]:
+            label, value, color = row[:3]
+            children = row[3] if len(row) > 3 else []
             painter.setPen(QColor("#0f172a"))
             painter.drawText(20, y, label)
             painter.drawText(self.width() - 140, y, money(value))
@@ -278,7 +282,13 @@ class BarsWidget(QWidget):
             painter.drawRoundedRect(20, y, self.width() - 190, 14, 7, 7)
             painter.setBrush(QColor(color))
             painter.drawRoundedRect(20, y, width, 14, 7, 7)
-            y += 38
+            y += 28
+            for child_label, child_value in children[:5]:
+                painter.setPen(QColor("#64748b"))
+                painter.drawText(42, y, f"• {child_label}")
+                painter.drawText(self.width() - 140, y, money(child_value))
+                y += 22
+            y += 10
 
 
 class TimelineWidget(QWidget):
@@ -411,8 +421,6 @@ class PocketLedgerQt(QMainWindow):
         self.setup_summary = QLabel()
         self.bill_breakdown_bars = BarsWidget()
         self.income_breakdown_bars = BarsWidget()
-        self.bill_breakdown_table = None
-        self.income_breakdown_table = None
         self.update_status = QLabel("Not checked yet.")
         self._build()
         self.refresh_all()
@@ -557,14 +565,6 @@ class PocketLedgerQt(QMainWindow):
         chart_row.addWidget(self.card_frame("Bills by category", self.bill_breakdown_bars), 1)
         chart_row.addWidget(self.card_frame("Income by source", self.income_breakdown_bars), 1)
         layout.addLayout(chart_row)
-        detail_row = QHBoxLayout()
-        self.bill_breakdown_table = self.table(("Group", "Item", "Due", "Paid from", "Amount"))
-        self.income_breakdown_table = self.table(("Source", "Frequency", "Pay day", "Amount"))
-        self.bill_breakdown_table.setMinimumHeight(260)
-        self.income_breakdown_table.setMinimumHeight(260)
-        detail_row.addWidget(self.card_frame("What makes up the bills", self.bill_breakdown_table), 1)
-        detail_row.addWidget(self.card_frame("What makes up the income", self.income_breakdown_table), 1)
-        layout.addLayout(detail_row)
         row = QHBoxLayout()
         self.bills_table = self.table(("Name", "Due", "Category", "Paid from", "Card", "Amount"))
         self.income_table = self.table(("Name", "Frequency", "Pay day", "Amount"))
@@ -961,56 +961,29 @@ class PocketLedgerQt(QMainWindow):
         income_total = self.scheduled_income_between(income, start, end)
         net = income_total - planned_outflow_total
         by_category: dict[str, float] = {}
-        bill_details = []
+        bill_children: dict[str, list[tuple[str, float]]] = {}
         for row in bills:
             amount = sum(float(row["amount"] or 0) for _d in self.dates_between(row["due_day"], start, end))
             by_category[row["category"]] = by_category.get(row["category"], 0) + amount
-            bill_details.append({
-                "id": len(bill_details) + 1,
-                "group": row["category"],
-                "item": row["name"],
-                "due": row["due_day"] or "—",
-                "paid_from": row["paid_from"],
-                "amount": amount,
-            })
+            bill_children.setdefault(row["category"], []).append((row["name"], amount))
         if card_minimum_total:
             by_category["Card minimums"] = by_category.get("Card minimums", 0) + card_minimum_total
             for row in cards:
                 amount = sum(float(row["minimum_payment"] or 0) for _d in self.dates_between(row["due_day"], start, end))
                 if amount:
-                    bill_details.append({
-                        "id": len(bill_details) + 1,
-                        "group": "Card minimums",
-                        "item": row["name"],
-                        "due": row["due_day"] or "—",
-                        "paid_from": "Debt page",
-                        "amount": amount,
-                    })
+                    bill_children.setdefault("Card minimums", []).append((row["name"], amount))
         if loan_payment_total:
             by_category["Loan / mortgage payments"] = by_category.get("Loan / mortgage payments", 0) + loan_payment_total
             for row in loans:
                 amount = sum(float(row["payment"] or 0) for _d in self.dates_between(row["due_day"], start, end))
                 if amount:
-                    bill_details.append({
-                        "id": len(bill_details) + 1,
-                        "group": "Loan / mortgage payments",
-                        "item": row["name"],
-                        "due": row["due_day"] or "—",
-                        "paid_from": "Debt page",
-                        "amount": amount,
-                    })
+                    bill_children.setdefault("Loan / mortgage payments", []).append((row["name"], amount))
         by_income: dict[str, float] = {}
-        income_details = []
+        income_children: dict[str, list[tuple[str, float]]] = {}
         for row in income:
             amount = sum(float(row["amount"] or 0) for _d in self.dates_between(row["pay_day"], start, end))
             by_income[row["name"]] = by_income.get(row["name"], 0) + amount
-            income_details.append({
-                "id": len(income_details) + 1,
-                "source": row["name"],
-                "frequency": row["frequency"],
-                "pay_day": row["pay_day"] or "—",
-                "amount": amount,
-            })
+            income_children.setdefault(row["name"], []).append((f"{row['frequency']} · day {row['pay_day'] or '—'}", amount))
         upcoming_bills = sorted(
             ((d, row) for row in bills for d in self.dates_between(row["due_day"], today, today + timedelta(days=45))),
             key=lambda item: (item[0], item[1]["name"]),
@@ -1056,14 +1029,14 @@ class PocketLedgerQt(QMainWindow):
         palette = ["#2563eb", "#0f766e", "#8b5cf6", "#f59e0b", "#06b6d4", "#ef4444", "#22c55e"]
         bill_rows = sorted(by_category.items(), key=lambda item: item[1], reverse=True)
         income_rows = sorted(by_income.items(), key=lambda item: item[1], reverse=True)
-        self.bill_breakdown_bars.set_rows([(name, value, palette[idx % len(palette)]) for idx, (name, value) in enumerate(bill_rows)])
-        self.income_breakdown_bars.set_rows([(name, value, palette[idx % len(palette)]) for idx, (name, value) in enumerate(income_rows)])
-        bill_details.sort(key=lambda row: (row["group"], int(row["due"]) if str(row["due"]).isdigit() else 99, row["item"]))
-        income_details.sort(key=lambda row: (int(row["pay_day"]) if str(row["pay_day"]).isdigit() else 99, row["source"]))
-        if self.bill_breakdown_table:
-            self.set_table(self.bill_breakdown_table, bill_details, lambda r: (r["group"], r["item"], r["due"], r["paid_from"], money(r["amount"])))
-        if self.income_breakdown_table:
-            self.set_table(self.income_breakdown_table, income_details, lambda r: (r["source"], r["frequency"], r["pay_day"], money(r["amount"])))
+        self.bill_breakdown_bars.set_rows([
+            (name, value, palette[idx % len(palette)], sorted(bill_children.get(name, []), key=lambda child: child[1], reverse=True))
+            for idx, (name, value) in enumerate(bill_rows)
+        ])
+        self.income_breakdown_bars.set_rows([
+            (name, value, palette[idx % len(palette)], sorted(income_children.get(name, []), key=lambda child: child[1], reverse=True))
+            for idx, (name, value) in enumerate(income_rows)
+        ])
 
     def loan_remaining(self, loan) -> float:
         return max(0.0, float(loan["balance"] or 0) - float(loan["extra_payment"] or 0))
