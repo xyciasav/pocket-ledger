@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.30"
+APP_VERSION = "0.2.31"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -146,12 +146,21 @@ class Store:
                 UNIQUE(event_date,event_type,event_name));
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '');
+            CREATE TABLE IF NOT EXISTS budget_targets (
+                id INTEGER PRIMARY KEY, ledger_id INTEGER NOT NULL DEFAULT 1,
+                category TEXT NOT NULL, monthly_limit REAL NOT NULL DEFAULT 0,
+                notes TEXT DEFAULT '', UNIQUE(ledger_id,category));
+            CREATE TABLE IF NOT EXISTS reconciliations (
+                id INTEGER PRIMARY KEY, ledger_id INTEGER NOT NULL DEFAULT 1,
+                check_date TEXT NOT NULL, expected_balance REAL NOT NULL DEFAULT 0,
+                actual_balance REAL NOT NULL DEFAULT 0, difference REAL NOT NULL DEFAULT 0,
+                notes TEXT DEFAULT '');
             """
         )
         self.conn.execute("INSERT OR IGNORE INTO ledgers(id,name,notes) VALUES(1,?,?)", (DEFAULT_LEDGER_NAME, "Default ledger"))
         self.ensure_column("bills", "paid_from", f"TEXT NOT NULL DEFAULT '{BANK_MANUAL}'")
         self.ensure_column("bills", "related_card_id", "INTEGER")
-        for table in ("bills", "income", "cards", "loans", "transactions", "cc_spending", "paid_scheduled", "scheduled_overrides"):
+        for table in ("bills", "income", "cards", "loans", "transactions", "cc_spending", "paid_scheduled", "scheduled_overrides", "budget_targets", "reconciliations"):
             self.ensure_column(table, "ledger_id", "INTEGER NOT NULL DEFAULT 1")
         self.ensure_column("transactions", "account_id", "INTEGER")
         self.ensure_column("transactions", "related_card_id", "INTEGER")
@@ -421,6 +430,7 @@ class PocketLedgerQt(QMainWindow):
         self.tables: dict[str, QTableWidget] = {}
         self.insight_bars = BarsWidget()
         self.insight_source_bars = BarsWidget()
+        self.budget_bars = BarsWidget()
         self.insight_metric_grid = QGridLayout()
         self.insight_detail_table = None
         self.llm_answer = QTextEdit()
@@ -433,6 +443,8 @@ class PocketLedgerQt(QMainWindow):
         self.spending_metric_grid = QGridLayout()
         self.cash_activity_metric_grid = QGridLayout()
         self.cash_activity_summary = QLabel()
+        self.reconcile_label = QLabel()
+        self.reconcile_history_table = None
         self.setup_metric_grid = QGridLayout()
         self.setup_summary = QLabel()
         self.bill_breakdown_bars = BarsWidget()
@@ -552,6 +564,18 @@ class PocketLedgerQt(QMainWindow):
         reset_row.addStretch()
         reset_row.addWidget(set_cash)
         layout.addLayout(reset_row)
+        self.reconcile_label.setObjectName("cardText")
+        self.reconcile_label.setWordWrap(True)
+        reconcile_card = self.compact_card_frame("Reconcile with bank", self.reconcile_label)
+        reconcile_layout = reconcile_card.layout()
+        reconcile_button = QPushButton("Check actual balance")
+        reconcile_button.setObjectName("primary")
+        reconcile_button.clicked.connect(self.reconcile_cash)
+        reconcile_layout.addWidget(reconcile_button, alignment=Qt.AlignRight)
+        layout.addWidget(reconcile_card)
+        self.reconcile_history_table = self.table(("Date", "Expected", "Actual", "Difference", "Notes"))
+        self.reconcile_history_table.setMinimumHeight(160)
+        layout.addWidget(self.card_frame("Recent reconciliations", self.reconcile_history_table))
         self.room_table = self.table(("Period", "Starting", "Income", "Due/planned", "After bills", "Safe", "Per day"))
         layout.addWidget(self.card_frame("Spending room", self.room_table))
         layout.addStretch()
@@ -677,6 +701,7 @@ class PocketLedgerQt(QMainWindow):
         layout.addWidget(filter_card)
         self.insight_metric_grid.setSpacing(14)
         layout.addLayout(self.insight_metric_grid)
+        layout.addWidget(self.card_frame("Budget targets", self.budget_bars))
         chart_row = QHBoxLayout()
         chart_row.addWidget(self.card_frame("Category breakdown", self.insight_bars), 1)
         chart_row.addWidget(self.card_frame("Where it came from", self.insight_source_bars), 1)
@@ -798,6 +823,9 @@ class PocketLedgerQt(QMainWindow):
         setup_note.setObjectName("cardText")
         setup_note.setWordWrap(True)
         layout.addWidget(self.card_frame("Setup data", setup_note))
+        self.budget_targets_table = self.table(("Category", "Monthly limit", "Notes"))
+        self.budget_targets_table.setMinimumHeight(220)
+        layout.addWidget(self.entity_card("Monthly budget targets", self.budget_targets_table, self.add_budget_target, self.edit_budget_target, self.delete_budget_target))
         recurring_row = QHBoxLayout()
         self.bills_table = self.table(("Name", "Due", "Category", "Paid from", "Card", "Amount"))
         self.income_table = self.table(("Name", "Frequency", "Pay day", "Amount"))
@@ -939,6 +967,8 @@ class PocketLedgerQt(QMainWindow):
             income = self.store.rows("SELECT * FROM income ORDER BY ledger_id,name")
             cards = self.store.rows("SELECT * FROM cards ORDER BY ledger_id,name")
             loans = self.store.rows("SELECT * FROM loans ORDER BY ledger_id,due_day,name")
+            budget_targets = self.store.rows("SELECT * FROM budget_targets ORDER BY ledger_id,category")
+            reconciliations = self.store.rows("SELECT * FROM reconciliations ORDER BY check_date DESC,id DESC LIMIT 10")
             transactions = self.store.rows(
                 """
                 SELECT t.*, COALESCE(a.name, 'Checking') account_name, COALESCE(c.name,'') related_card_name
@@ -960,6 +990,8 @@ class PocketLedgerQt(QMainWindow):
             income = self.store.rows("SELECT * FROM income WHERE ledger_id=? ORDER BY name", (self.ledger_id,))
             cards = self.store.rows("SELECT * FROM cards WHERE ledger_id=? ORDER BY name", (self.ledger_id,))
             loans = self.store.rows("SELECT * FROM loans WHERE ledger_id=? ORDER BY due_day,name", (self.ledger_id,))
+            budget_targets = self.store.rows("SELECT * FROM budget_targets WHERE ledger_id=? ORDER BY category", (self.ledger_id,))
+            reconciliations = self.store.rows("SELECT * FROM reconciliations WHERE ledger_id=? ORDER BY check_date DESC,id DESC LIMIT 10", (self.ledger_id,))
             transactions = self.store.rows(
                 """
                 SELECT t.*, COALESCE(a.name, ?) account_name, COALESCE(c.name,'') related_card_name
@@ -980,11 +1012,11 @@ class PocketLedgerQt(QMainWindow):
                 """,
                 (self.ledger_id,),
             )
-        return cash, bills, income, cards, loans, transactions, spending
+        return cash, bills, income, cards, loans, transactions, spending, budget_targets, reconciliations
 
     def refresh_all(self) -> None:
         self.refresh_ledgers()
-        cash, bills, income, cards, loans, transactions, spending = self.rows()
+        cash, bills, income, cards, loans, transactions, spending, budget_targets, reconciliations = self.rows()
         today = date.today()
         start_date = self.parse_date(cash["start_date"])
         change_start = start_date + timedelta(days=1)
@@ -1024,6 +1056,7 @@ class PocketLedgerQt(QMainWindow):
         self.refresh_setup_summary(bills, income, cards, loans, today)
         self.set_table(self.cards_table, cards, lambda r: (r["name"], money(card_balances.get(r["id"], 0)), money(float(r["credit_limit"] or 0)-card_balances.get(r["id"], 0)), money(r["credit_limit"]), f"{r['apr']:.2f}%", money(r["minimum_payment"]), r["due_day"] or "—"))
         self.set_table(self.loans_table, loans, lambda r: (r["name"], r["lender"], money(self.loan_remaining(r)), money(self.loan_original_amount(r)), money(r["extra_payment"]), f"{r['apr']:.2f}%", money(r["payment"]), r["due_day"] or "—"))
+        self.set_table(self.budget_targets_table, budget_targets, lambda r: (r["category"], money(r["monthly_limit"]), r["notes"] or ""))
         self.refresh_debt_summary(cards, loans)
         self.set_table(self.transactions_table, transactions, lambda r: (r["trans_date"], r["account_name"], r["description"], r["category"], r["related_card_name"] or "—", money(r["amount"])))
         self.set_table(self.spending_table, spending, lambda r: (r["spend_date"], r["card_name"], r["description"], r["category"], money(r["amount"]), "No"))
@@ -1046,7 +1079,8 @@ class PocketLedgerQt(QMainWindow):
         self.refresh_spending_summary(spending)
         room = self.spending_room_periods(bills, income, cards, loans, cash_today, today)
         self.set_table(self.room_table, room, lambda r: (r["period"], money(r["starting"]), money(r["income"]), money(r["due"]), money(r["after"]), money(r["safe"]), money(r["daily"])))
-        self.refresh_insights(bills, cards, loans, transactions, spending)
+        self.refresh_reconciliation_summary(cash_today, reconciliations)
+        self.refresh_insights(bills, cards, loans, transactions, spending, budget_targets)
 
     def color_cashflow_table(self) -> None:
         for row in range(self.cashflow_table.rowCount()):
@@ -1141,6 +1175,25 @@ class PocketLedgerQt(QMainWindow):
             "Spending is for what you bought and where money went: coffee, food, groceries, gas, shopping, etc. "
             "Example: buying Dutch Bros on a credit card goes on Spending; paying that credit card from checking goes on Cash Activity."
         )
+
+    def refresh_reconciliation_summary(self, cash_today: float, reconciliations) -> None:
+        latest = reconciliations[0] if reconciliations else None
+        if latest:
+            self.reconcile_label.setText(
+                f"App expected {money(latest['expected_balance'])}, bank showed {money(latest['actual_balance'])}, "
+                f"difference {signed_money(latest['difference'])} on {latest['check_date']}. "
+                "Use this when the app and bank drift apart."
+            )
+        else:
+            self.reconcile_label.setText(
+                f"The app currently expects {money(cash_today)} in checking. Enter the real bank balance to see the difference and save a checkup."
+            )
+        if self.reconcile_history_table:
+            self.set_table(
+                self.reconcile_history_table,
+                reconciliations,
+                lambda r: (r["check_date"], money(r["expected_balance"]), money(r["actual_balance"]), signed_money(r["difference"]), r["notes"] or ""),
+            )
 
     def refresh_debt_summary(self, cards, loans) -> None:
         card_balance = sum(float(row["balance"] or 0) for row in cards)
@@ -1313,7 +1366,7 @@ class PocketLedgerQt(QMainWindow):
         self.update_insight_month_label()
         self.refresh_all()
 
-    def refresh_insights(self, bills, cards, loans, transactions, spending) -> None:
+    def refresh_insights(self, bills, cards, loans, transactions, spending, budget_targets) -> None:
         start = self.insight_month_start
         end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
         records = []
@@ -1360,6 +1413,31 @@ class PocketLedgerQt(QMainWindow):
         count = len(records)
         top_category = category_rows[0][0] if category_rows else "—"
         avg = total / count if count else 0
+        month_days = calendar.monthrange(start.year, start.month)[1]
+        today = date.today()
+        elapsed_days = max(1, min(today.day, month_days)) if today.year == start.year and today.month == start.month else month_days
+        budget_rows = []
+        over_count = 0
+        projected_over_count = 0
+        for target in budget_targets:
+            limit = float(target["monthly_limit"] or 0)
+            if limit <= 0:
+                continue
+            spent = float(by_category.get(target["category"], 0))
+            projected = spent / elapsed_days * month_days
+            remaining = limit - spent
+            if spent > limit:
+                over_count += 1
+            if projected > limit:
+                projected_over_count += 1
+            tone = "#ef4444" if spent > limit else "#f59e0b" if projected > limit else "#0f766e"
+            budget_rows.append((
+                target["category"],
+                spent,
+                tone,
+                [("Budget", limit), ("Remaining", remaining), ("Projected", projected)],
+                limit,
+            ))
 
         for i in reversed(range(self.insight_metric_grid.count())):
             widget = self.insight_metric_grid.itemAt(i).widget()
@@ -1370,9 +1448,11 @@ class PocketLedgerQt(QMainWindow):
             Metric("Items counted", str(count), "Transactions, scheduled bills, and debt payments.", "slate"),
             Metric("Top category", top_category, "Largest category in this view.", "teal"),
             Metric("Average item", money(avg), "Average across counted records.", "slate"),
+            Metric("Budgets over", str(over_count), "Targets already over budget this month.", "slate" if over_count else "teal"),
+            Metric("Projected over", str(projected_over_count), "Targets likely to go over at the current pace.", "slate" if projected_over_count else "teal"),
         )
         for idx, metric in enumerate(metrics):
-            self.insight_metric_grid.addWidget(MetricCard(metric), 0, idx)
+            self.insight_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
 
         palette = ["#2563eb", "#0f766e", "#8b5cf6", "#f59e0b", "#06b6d4", "#ef4444", "#22c55e"]
         self.insight_bars.set_rows([
@@ -1384,6 +1464,7 @@ class PocketLedgerQt(QMainWindow):
             )
             for idx, (name, value) in enumerate(category_rows)
         ])
+        self.budget_bars.set_rows(sorted(budget_rows, key=lambda row: (row[1] - row[4]), reverse=True))
         self.insight_source_bars.set_rows([
             (
                 name,
@@ -1507,7 +1588,7 @@ class PocketLedgerQt(QMainWindow):
             return
         folder = Path(folder_text) / f"PocketLedger-export-{date.today().isoformat()}"
         folder.mkdir(parents=True, exist_ok=True)
-        cash, bills, income, cards, loans, transactions, spending = self.rows()
+        cash, bills, income, cards, loans, transactions, spending, budget_targets, reconciliations = self.rows()
         exports = {
             "cash_account.csv": [dict(cash)],
             "bills.csv": self.row_dicts(bills),
@@ -1516,6 +1597,8 @@ class PocketLedgerQt(QMainWindow):
             "loans.csv": self.row_dicts(loans),
             "cash_activity.csv": self.row_dicts(transactions),
             "spending.csv": self.row_dicts(spending),
+            "budget_targets.csv": self.row_dicts(budget_targets),
+            "reconciliations.csv": self.row_dicts(reconciliations),
         }
         for name, rows in exports.items():
             self.write_csv(folder / name, rows)
@@ -1531,7 +1614,7 @@ class PocketLedgerQt(QMainWindow):
         )
         if not path_text:
             return
-        cash, bills, income, cards, loans, transactions, _spending = self.rows()
+        cash, bills, income, cards, loans, transactions, _spending, _budget_targets, _reconciliations = self.rows()
         today = date.today()
         start_date = self.parse_date(cash["start_date"])
         change_start = start_date + timedelta(days=1)
@@ -1555,7 +1638,7 @@ class PocketLedgerQt(QMainWindow):
         )
         if not path_text:
             return
-        tables = ("ledgers", "cash_accounts", "bills", "income", "cards", "loans", "transactions", "cc_spending", "paid_scheduled", "scheduled_overrides", "settings")
+        tables = ("ledgers", "cash_accounts", "bills", "income", "cards", "loans", "transactions", "cc_spending", "budget_targets", "reconciliations", "paid_scheduled", "scheduled_overrides", "settings")
         data = {
             "app": "Pocket Ledger",
             "version": APP_VERSION,
@@ -1702,7 +1785,7 @@ class PocketLedgerQt(QMainWindow):
         return cleaned.strip() or "The local model returned only hidden reasoning. Try again or switch to a non-thinking/instruct model."
 
     def llm_month_summary(self) -> dict:
-        cash, bills, income, cards, loans, transactions, spending = self.rows()
+        cash, bills, income, cards, loans, transactions, spending, budget_targets, _reconciliations = self.rows()
         today = date.today()
         start = self.insight_month_start
         end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
@@ -1808,6 +1891,16 @@ class PocketLedgerQt(QMainWindow):
                 "spending_room_periods": room,
             },
             "spending_by_category": dict(sorted(by_category.items(), key=lambda item: item[1], reverse=True)),
+            "budget_targets": [
+                {
+                    "category": row["category"],
+                    "monthly_limit": float(row["monthly_limit"] or 0),
+                    "spent": float(by_category.get(row["category"], 0)),
+                    "remaining": float(row["monthly_limit"] or 0) - float(by_category.get(row["category"], 0)),
+                    "projected_at_current_pace": float(by_category.get(row["category"], 0)) / elapsed_days * month_days,
+                }
+                for row in budget_targets
+            ],
             "spending_by_account": dict(sorted(by_account.items(), key=lambda item: item[1], reverse=True)),
             "spending_by_description": dict(sorted(by_description.items(), key=lambda item: item[1], reverse=True)[:30]),
             "spending_history_last_6_months": history,
@@ -1835,11 +1928,12 @@ class PocketLedgerQt(QMainWindow):
             "Do not ask follow-up questions. Use only the data provided and clearly say when something is an estimate. "
             "Do not output hidden reasoning, chain-of-thought, planning notes, self-correction, or <think> tags. "
             "Only output the final report. Be specific, opinionated, and practical. If spending looks high, say so plainly. "
-            "Call out merchants/descriptions that are unusually high compared with prior months when the comparison data supports it.\n\n"
+            "Call out merchants/descriptions that are unusually high compared with prior months when the comparison data supports it. "
+            "If budget targets are present, compare spending to those limits and call out over-budget or projected-over-budget categories.\n\n"
             "Report format:\n"
             "1. Bottom line: 2-4 sentences explaining whether the user is on track, overspending, tight on cashflow, or at card/debt risk.\n"
             "2. Why: compare planned income versus bills, debt payments, and projected spending. Say if they are on pace to spend more than they make.\n"
-            "3. Spending callouts: list specific categories and descriptions/merchants that are high, repeated, or up versus prior-month averages. Mention examples like coffee/fast food only if present in the data.\n"
+            "3. Spending and budget callouts: list specific categories and descriptions/merchants that are high, repeated, over budget, projected over budget, or up versus prior-month averages. Mention examples like coffee/fast food only if present in the data.\n"
             "4. Cashflow forecast: point out the tightest upcoming dates/paycheck windows, lowest cash, next income, next outflow, and any overdraft or credit-card-risk moments.\n"
             "5. What to do next: 5 concrete actions for the next 7-30 days, including suggested caps or cuts by category/merchant when supported by data.\n"
             "6. Encouraging summary: one short sentence that is honest but not doom-y.\n\n"
@@ -1998,6 +2092,37 @@ class PocketLedgerQt(QMainWindow):
         )
         self.refresh_all()
 
+    def expected_cash_today(self) -> float:
+        cash, bills, income, cards, loans, transactions, _spending, _budget_targets, _reconciliations = self.rows()
+        today = date.today()
+        start_date = self.parse_date(cash["start_date"])
+        change_start = start_date + timedelta(days=1)
+        income_received = self.scheduled_income_between(income, change_start, today)
+        due_outflow = self.scheduled_checking_outflow_between(bills, cards, loans, change_start, today)
+        actual_spending = self.transaction_total_between(transactions, change_start, today)
+        extra_income = sum(row["amount"] for row in transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
+        return float(cash["starting_balance"] or 0) + income_received + extra_income - due_outflow - actual_spending
+
+    def reconcile_cash(self) -> None:
+        if not self.require_single_ledger():
+            return
+        expected = self.expected_cash_today()
+        values = self.simple_dialog(
+            "Reconcile checking",
+            [("check_date","date",()),("actual_balance","money",()),("notes","text",())],
+            {"check_date": date.today().isoformat(), "actual_balance": expected, "notes": ""},
+        )
+        if not values:
+            return
+        actual = float(values["actual_balance"] or 0)
+        difference = actual - expected
+        self.store.execute(
+            "INSERT INTO reconciliations(ledger_id,check_date,expected_balance,actual_balance,difference,notes) VALUES(?,?,?,?,?,?)",
+            (self.ledger_id, values["check_date"], expected, actual, difference, values["notes"]),
+        )
+        QMessageBox.information(self, "Reconciliation saved", f"Expected: {money(expected)}\nActual: {money(actual)}\nDifference: {signed_money(difference)}")
+        self.refresh_all()
+
     def add_bill(self): self.bill_dialog()
     def edit_bill(self):
         row_id = self.selected_id(self.bills_table)
@@ -2056,6 +2181,32 @@ class PocketLedgerQt(QMainWindow):
         if not values: return
         if row: self.store.execute("UPDATE loans SET name=?,lender=?,balance=?,original_amount=?,extra_payment=?,apr=?,payment=?,due_day=?,notes=? WHERE id=? AND ledger_id=?", (values["name"], values["lender"], values["balance"], values["original_amount"], values["extra_payment"], values["apr"], values["payment"], values["due_day"], values["notes"], row["id"], self.ledger_id))
         else: self.store.execute("INSERT INTO loans(name,lender,balance,original_amount,extra_payment,apr,payment,due_day,notes,ledger_id) VALUES(?,?,?,?,?,?,?,?,?,?)", (values["name"], values["lender"], values["balance"], values["original_amount"], values["extra_payment"], values["apr"], values["payment"], values["due_day"], values["notes"], self.ledger_id))
+        self.refresh_all()
+
+    def add_budget_target(self): self.budget_target_dialog()
+    def edit_budget_target(self):
+        row_id = self.selected_id(self.budget_targets_table)
+        if row_id: self.budget_target_dialog(self.store.one("SELECT * FROM budget_targets WHERE id=? AND ledger_id=?", (row_id, self.ledger_id)))
+    def delete_budget_target(self): self.delete_selected("budget_targets", self.budget_targets_table)
+    def budget_target_dialog(self, row=None):
+        choices = tuple(dict.fromkeys(list(SPENDING_CATEGORIES) + list(CATEGORIES) + ["Debt", "Card minimums", "Loan / mortgage payments"]))
+        values = self.simple_dialog(
+            "Monthly budget target",
+            [("category","choice",choices),("monthly_limit","money",()),("notes","text",())],
+            dict(row) if row else {"category": choices[0], "monthly_limit": 0, "notes": ""},
+        )
+        if not values:
+            return
+        if row:
+            self.store.execute(
+                "UPDATE budget_targets SET category=?,monthly_limit=?,notes=? WHERE id=? AND ledger_id=?",
+                (values["category"], values["monthly_limit"], values["notes"], row["id"], self.ledger_id),
+            )
+        else:
+            self.store.execute(
+                "INSERT INTO budget_targets(ledger_id,category,monthly_limit,notes) VALUES(?,?,?,?) ON CONFLICT(ledger_id,category) DO UPDATE SET monthly_limit=excluded.monthly_limit,notes=excluded.notes",
+                (self.ledger_id, values["category"], values["monthly_limit"], values["notes"]),
+            )
         self.refresh_all()
 
     def add_transaction(self): self.transaction_dialog()
