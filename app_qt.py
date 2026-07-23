@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.17"
+APP_VERSION = "0.2.18"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -149,6 +149,7 @@ class Store:
         self.ensure_column("transactions", "account_id", "INTEGER")
         self.ensure_column("transactions", "related_card_id", "INTEGER")
         self.ensure_column("loans", "extra_payment", "REAL NOT NULL DEFAULT 0")
+        self.ensure_column("loans", "original_amount", "REAL NOT NULL DEFAULT 0")
         self.ensure_default_cash_account()
         self.conn.commit()
 
@@ -681,7 +682,7 @@ class PocketLedgerQt(QMainWindow):
         layout.addLayout(recurring_row)
         debt_row = QHBoxLayout()
         self.cards_table = self.table(("Card", "Current balance", "Available", "Limit", "APR", "Payment", "Due"))
-        self.loans_table = self.table(("Loan", "Lender", "Remaining", "Balance", "Extra paid", "APR", "Payment", "Due"))
+        self.loans_table = self.table(("Loan", "Lender", "Current balance", "Original amount", "Extra paid", "APR", "Payment", "Due"))
         debt_row.addWidget(self.entity_card("Credit cards / spending cards", self.cards_table, self.add_card, self.edit_card, self.delete_card), 1)
         debt_row.addWidget(self.entity_card("Loans / mortgages", self.loans_table, self.add_loan, self.edit_loan, self.delete_loan), 1)
         layout.addLayout(debt_row)
@@ -884,7 +885,7 @@ class PocketLedgerQt(QMainWindow):
         self.set_table(self.income_table, income, lambda r: (r["name"], r["frequency"], r["pay_day"] or "—", money(r["amount"])))
         self.refresh_setup_summary(bills, income, cards, loans, today)
         self.set_table(self.cards_table, cards, lambda r: (r["name"], money(card_balances.get(r["id"], 0)), money(float(r["credit_limit"] or 0)-card_balances.get(r["id"], 0)), money(r["credit_limit"]), f"{r['apr']:.2f}%", money(r["minimum_payment"]), r["due_day"] or "—"))
-        self.set_table(self.loans_table, loans, lambda r: (r["name"], r["lender"], money(self.loan_remaining(r)), money(r["balance"]), money(r["extra_payment"]), f"{r['apr']:.2f}%", money(r["payment"]), r["due_day"] or "—"))
+        self.set_table(self.loans_table, loans, lambda r: (r["name"], r["lender"], money(self.loan_remaining(r)), money(self.loan_original_amount(r)), money(r["extra_payment"]), f"{r['apr']:.2f}%", money(r["payment"]), r["due_day"] or "—"))
         self.refresh_debt_summary(cards, loans)
         self.set_table(self.transactions_table, transactions, lambda r: (r["trans_date"], r["account_name"], r["description"], r["category"], r["related_card_name"] or "—", money(r["amount"])))
         self.set_table(self.spending_table, spending, lambda r: (r["spend_date"], r["card_name"], r["description"], r["category"], money(r["amount"]), "No"))
@@ -986,7 +987,7 @@ class PocketLedgerQt(QMainWindow):
             Metric("Card balance", money(card_balance), "Current balances you entered on credit cards.", "blue"),
             Metric("Card room", money(card_room), f"Available out of {money(card_limit)} total limits.", "teal" if card_room >= 0 else "slate"),
             Metric("Card minimums", money(card_minimums), "Scheduled minimum payments from all cards.", "slate"),
-            Metric("Loans / mortgages", money(loan_remaining), "Remaining balances after extra paid amounts.", "slate"),
+            Metric("Loans / mortgages", money(loan_remaining), "Current remaining balances you entered for loans/mortgages.", "slate"),
             Metric("Loan payments", money(loan_payments), "Monthly payments scheduled from Debt.", "blue"),
             Metric("Highest APR", f"{float(highest_apr_card['apr'] or 0):.2f}%" if highest_apr_card else "—", highest_apr_card["name"] if highest_apr_card else "No cards added.", "slate"),
         )
@@ -994,6 +995,7 @@ class PocketLedgerQt(QMainWindow):
             self.debt_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
         self.debt_summary.setText(
             "Debt is the source of truth for current credit card balances, card minimums, and loan/mortgage payments. "
+            "Loan balance means current remaining balance; original amount and extra paid are separate reference fields. "
             "Card purchases on the Spending page are for tracking and insights; they do not change current card balance here."
         )
         palette = ["#2563eb", "#0f766e", "#8b5cf6", "#f59e0b", "#06b6d4", "#ef4444", "#22c55e"]
@@ -1015,7 +1017,7 @@ class PocketLedgerQt(QMainWindow):
                 row["name"],
                 remaining,
                 palette[idx % len(palette)],
-                [("Monthly payment", float(row["payment"] or 0)), ("Extra paid", float(row["extra_payment"] or 0)), ("Original balance", float(row["balance"] or 0))],
+                [("Monthly payment", float(row["payment"] or 0)), ("Extra paid", float(row["extra_payment"] or 0)), ("Original amount", self.loan_original_amount(row))],
             ))
         self.card_debt_bars.set_rows(sorted(card_rows, key=lambda row: row[1], reverse=True))
         self.loan_debt_bars.set_rows(sorted(loan_rows, key=lambda row: row[1], reverse=True))
@@ -1115,7 +1117,11 @@ class PocketLedgerQt(QMainWindow):
         ])
 
     def loan_remaining(self, loan) -> float:
-        return max(0.0, float(loan["balance"] or 0) - float(loan["extra_payment"] or 0))
+        return max(0.0, float(loan["balance"] or 0))
+
+    def loan_original_amount(self, loan) -> float:
+        original = float(loan["original_amount"] or 0)
+        return original if original > 0 else float(loan["balance"] or 0)
 
     def update_insight_month_label(self) -> None:
         self.insight_month_label.setText(f"{self.insight_month_start:%B %Y}")
@@ -1477,10 +1483,13 @@ class PocketLedgerQt(QMainWindow):
         if row_id: self.loan_dialog(self.store.one("SELECT * FROM loans WHERE id=? AND ledger_id=?", (row_id, self.ledger_id)))
     def delete_loan(self): self.delete_selected("loans", self.loans_table)
     def loan_dialog(self, row=None):
-        values = self.simple_dialog("Loan", [("name","text",()),("lender","text",()),("balance","money",()),("extra_payment","money",()),("apr","percent",()),("payment","money",()),("due_day","day",()),("notes","text",())], dict(row) if row else {})
+        initial = dict(row) if row else {}
+        if row and not float(initial.get("original_amount") or 0):
+            initial["original_amount"] = initial.get("balance", 0)
+        values = self.simple_dialog("Loan", [("name","text",()),("lender","text",()),("balance","money",()),("original_amount","money",()),("extra_payment","money",()),("apr","percent",()),("payment","money",()),("due_day","day",()),("notes","text",())], initial)
         if not values: return
-        if row: self.store.execute("UPDATE loans SET name=?,lender=?,balance=?,extra_payment=?,apr=?,payment=?,due_day=?,notes=? WHERE id=? AND ledger_id=?", (values["name"], values["lender"], values["balance"], values["extra_payment"], values["apr"], values["payment"], values["due_day"], values["notes"], row["id"], self.ledger_id))
-        else: self.store.execute("INSERT INTO loans(name,lender,balance,extra_payment,apr,payment,due_day,notes,ledger_id) VALUES(?,?,?,?,?,?,?,?,?)", (values["name"], values["lender"], values["balance"], values["extra_payment"], values["apr"], values["payment"], values["due_day"], values["notes"], self.ledger_id))
+        if row: self.store.execute("UPDATE loans SET name=?,lender=?,balance=?,original_amount=?,extra_payment=?,apr=?,payment=?,due_day=?,notes=? WHERE id=? AND ledger_id=?", (values["name"], values["lender"], values["balance"], values["original_amount"], values["extra_payment"], values["apr"], values["payment"], values["due_day"], values["notes"], row["id"], self.ledger_id))
+        else: self.store.execute("INSERT INTO loans(name,lender,balance,original_amount,extra_payment,apr,payment,due_day,notes,ledger_id) VALUES(?,?,?,?,?,?,?,?,?,?)", (values["name"], values["lender"], values["balance"], values["original_amount"], values["extra_payment"], values["apr"], values["payment"], values["due_day"], values["notes"], self.ledger_id))
         self.refresh_all()
 
     def add_transaction(self): self.transaction_dialog()
