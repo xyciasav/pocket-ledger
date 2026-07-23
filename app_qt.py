@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.6"
+APP_VERSION = "0.2.7"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -808,7 +808,7 @@ class PocketLedgerQt(QMainWindow):
         metrics = (
             Metric("Checking today", money(cash_today), "Cash after baseline, landed income, checking outflows, and manual spending.", "teal"),
             Metric("Card debt / room", f"{money(card_debt)} / {money(card_room)}", "Card pressure and available room.", "blue"),
-            Metric("Loan balance", money(loan_debt), "Personal loans tracked separately from card room.", "slate"),
+            Metric("Loans balance", money(loan_debt), "Mortgages, personal loans, and other fixed payoff balances.", "slate"),
             Metric("Income after baseline", money(income_received), "Only counted after its pay date.", "blue"),
             Metric("Due from checking", money(due_outflow), "ACH bills, card minimums, and loan payments.", "slate"),
             Metric("Checking spending", money(actual_spending), "Manual checking outflows since baseline.", "slate"),
