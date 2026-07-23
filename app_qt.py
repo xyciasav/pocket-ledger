@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.4"
+APP_VERSION = "0.2.5"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -280,6 +280,44 @@ class BarsWidget(QWidget):
             y += 38
 
 
+class TimelineWidget(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[dict] = []
+        self.setMinimumHeight(220)
+
+    def set_events(self, events: list[dict]) -> None:
+        self.events = events[:10]
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#ffffff"))
+        if not self.events:
+            painter.setPen(QColor("#64748b"))
+            painter.drawText(self.rect(), Qt.AlignCenter, "No upcoming cashflow yet.")
+            return
+        x = 32
+        y = 30
+        painter.setPen(QColor("#cbd5e1"))
+        painter.drawLine(x + 8, y, x + 8, min(self.height() - 24, y + len(self.events) * 42))
+        for row in self.events:
+            amount = float(row["amount"] or 0)
+            color = "#dcfce7" if amount > 0 else "#fee2e2" if amount < 0 else "#e0f2fe"
+            dot = "#16a34a" if amount > 0 else "#ef4444" if amount < 0 else "#0284c7"
+            painter.setBrush(QColor(dot))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(x, y - 7, 16, 16)
+            painter.setBrush(QColor(color))
+            painter.drawRoundedRect(x + 30, y - 18, max(220, self.width() - 78), 34, 10, 10)
+            painter.setPen(QColor("#0f172a"))
+            painter.drawText(x + 44, y + 4, f"{row['date']}  •  {row['kind']}  •  {row['name']}")
+            painter.setPen(QColor(dot))
+            painter.drawText(self.width() - 190, y + 4, f"{signed_money(amount)}  →  {money(row['running'])}")
+            y += 42
+
+
 class RowDialog(QDialog):
     def __init__(self, title: str, fields: list[tuple[str, str, object]], initial: dict | None = None, parent=None):
         super().__init__(parent)
@@ -362,6 +400,10 @@ class PocketLedgerQt(QMainWindow):
         self.insight_source_bars = BarsWidget()
         self.insight_metric_grid = QGridLayout()
         self.insight_detail_table = None
+        self.cashflow_metric_grid = QGridLayout()
+        self.cashflow_visual = TimelineWidget()
+        self.cashflow_summary = QLabel()
+        self.spending_metric_grid = QGridLayout()
         self.update_status = QLabel("Not checked yet.")
         self._build()
         self.refresh_all()
@@ -381,6 +423,7 @@ class PocketLedgerQt(QMainWindow):
         self.add_page("Cashflow", self.cashflow_page())
         self.add_page("Bills + Income", self.setup_page())
         self.add_page("Debt", self.debt_page())
+        self.add_page("Cash Activity", self.cash_activity_page())
         self.add_page("Spending", self.spending_page())
         self.add_page("Insights", self.insights_page())
         self.add_page("Settings", self.settings_page())
@@ -405,7 +448,7 @@ class PocketLedgerQt(QMainWindow):
         self.ledger_combo.setObjectName("ledgerCombo")
         layout.addWidget(self.ledger_combo)
         layout.addSpacing(18)
-        for name in ("Overview", "Cashflow", "Bills + Income", "Debt", "Spending", "Insights", "Settings"):
+        for name in ("Overview", "Cashflow", "Bills + Income", "Debt", "Cash Activity", "Spending", "Insights", "Settings"):
             button = QPushButton(name)
             button.setObjectName("nav")
             button.clicked.connect(lambda _checked=False, n=name: self.go(n))
@@ -469,9 +512,15 @@ class PocketLedgerQt(QMainWindow):
         return page
 
     def cashflow_page(self) -> QWidget:
-        page, layout = self.shell("Cashflow", "Timeline of money landing and leaving your checking account.")
+        page, layout = self.shell("Cashflow", "Today forward: money landing, bills leaving checking, and the balance after each hit.")
+        self.cashflow_metric_grid.setSpacing(14)
+        layout.addLayout(self.cashflow_metric_grid)
+        self.cashflow_summary.setObjectName("cardText")
+        self.cashflow_summary.setWordWrap(True)
+        layout.addWidget(self.card_frame("What to watch", self.cashflow_summary))
+        layout.addWidget(self.card_frame("Next moves", self.cashflow_visual))
         self.cashflow_table = self.table(("Date", "Type", "Name", "Amount", "Running cash"))
-        layout.addWidget(self.card_frame("Upcoming timeline", self.cashflow_table))
+        layout.addWidget(self.card_frame("Detailed timeline", self.cashflow_table))
         return page
 
     def setup_page(self) -> QWidget:
@@ -492,14 +541,18 @@ class PocketLedgerQt(QMainWindow):
         layout.addWidget(self.entity_card("Loans / debt payoff", self.loans_table, self.add_loan, self.edit_loan, self.delete_loan))
         return page
 
-    def spending_page(self) -> QWidget:
-        page, layout = self.shell("Spending", "Checking transactions affect cashflow; card purchases track spend and available room.")
-        row = QHBoxLayout()
+    def cash_activity_page(self) -> QWidget:
+        page, layout = self.shell("Cash Activity", "Manual checking activity. These rows affect the cashflow forecast.")
         self.transactions_table = self.table(("Date", "Account", "Description", "Category", "Card paid", "Amount"))
+        layout.addWidget(self.entity_card("Checking / cashflow transactions", self.transactions_table, self.add_transaction, self.edit_transaction, self.delete_transaction))
+        return page
+
+    def spending_page(self) -> QWidget:
+        page, layout = self.shell("Spending", "Purchase tracking for cards and direct spending. This is for habits, limits, and insights.")
+        self.spending_metric_grid.setSpacing(14)
+        layout.addLayout(self.spending_metric_grid)
         self.spending_table = self.table(("Date", "Account", "Description", "Category", "Amount", "Cashflow?"))
-        row.addWidget(self.entity_card("Checking / cashflow transactions", self.transactions_table, self.add_transaction, self.edit_transaction, self.delete_transaction), 1)
-        row.addWidget(self.entity_card("Purchase tracker", self.spending_table, self.add_spending, self.edit_spending, self.delete_spending), 1)
-        layout.addLayout(row)
+        layout.addWidget(self.entity_card("Purchase tracker", self.spending_table, self.add_spending, self.edit_spending, self.delete_spending))
         return page
 
     def insights_page(self) -> QWidget:
@@ -753,11 +806,86 @@ class PocketLedgerQt(QMainWindow):
         self.set_table(self.transactions_table, transactions, lambda r: (r["trans_date"], r["account_name"], r["description"], r["category"], r["related_card_name"] or "—", money(r["amount"])))
         self.set_table(self.spending_table, spending, lambda r: (r["spend_date"], r["card_name"], r["description"], r["category"], money(r["amount"]), "No"))
 
-        timeline = self.upcoming_events(bills, income, cards, loans, transactions, cash_today, today - timedelta(days=14), today + timedelta(days=45))
+        timeline = self.upcoming_events(bills, income, cards, loans, transactions, cash_today, today + timedelta(days=1), today + timedelta(days=60))
+        timeline.insert(0, {"id": 0, "date": today.isoformat(), "kind": "Today", "name": "Starting cash", "amount": 0, "running": cash_today})
         self.set_table(self.cashflow_table, timeline, lambda r: (r["date"], r["kind"], r["name"], signed_money(r["amount"]), money(r["running"])))
+        self.cashflow_table.sortItems(0, Qt.AscendingOrder)
+        self.color_cashflow_table()
+        self.refresh_cashflow_summary(timeline, cash_today)
+        self.refresh_spending_summary(spending)
         room = self.spending_room_periods(bills, income, cards, loans, cash_today, today)
         self.set_table(self.room_table, room, lambda r: (r["period"], money(r["starting"]), money(r["income"]), money(r["due"]), money(r["after"]), money(r["safe"]), money(r["daily"])))
         self.refresh_insights(bills, cards, loans, transactions, spending)
+
+    def color_cashflow_table(self) -> None:
+        for row in range(self.cashflow_table.rowCount()):
+            amount_text = self.cashflow_table.item(row, 3).text() if self.cashflow_table.item(row, 3) else "$0.00"
+            if amount_text.startswith("+"):
+                background = QColor("#ecfdf5")
+            elif amount_text.startswith("-"):
+                background = QColor("#fff1f2")
+            else:
+                background = QColor("#eff6ff")
+            for col in range(self.cashflow_table.columnCount()):
+                item = self.cashflow_table.item(row, col)
+                if item:
+                    item.setBackground(background)
+                    item.setForeground(QColor("#0f172a"))
+
+    def refresh_cashflow_summary(self, timeline: list[dict], cash_today: float) -> None:
+        low = min([cash_today] + [float(row["running"] or 0) for row in timeline]) if timeline else cash_today
+        next_income = next((row for row in timeline if float(row["amount"] or 0) > 0), None)
+        next_out = next((row for row in timeline if float(row["amount"] or 0) < 0), None)
+        thirty_day_out = sum(abs(float(row["amount"] or 0)) for row in timeline[:100] if float(row["amount"] or 0) < 0 and self.parse_date(row["date"]) <= date.today() + timedelta(days=30))
+        for i in reversed(range(self.cashflow_metric_grid.count())):
+            widget = self.cashflow_metric_grid.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        metrics = (
+            Metric("Starting today", money(cash_today), "This is the opening point for the forecast.", "teal"),
+            Metric("Lowest forecast", money(low), "Lowest checking balance in the visible timeline.", "blue" if low >= 0 else "slate"),
+            Metric("Next money in", money(next_income["amount"]) if next_income else "—", next_income["date"] if next_income else "No upcoming income found.", "blue"),
+            Metric("Next money out", signed_money(next_out["amount"]) if next_out else "—", f"{next_out['date']} · {next_out['name']}" if next_out else "No upcoming outflow found.", "slate"),
+            Metric("30-day outflow", money(thirty_day_out), "Bills, card minimums, loans, and planned checking spending.", "slate"),
+            Metric("Events shown", str(len(timeline)), "Today through the next 60 days.", "slate"),
+        )
+        for idx, metric in enumerate(metrics):
+            self.cashflow_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
+        self.cashflow_visual.set_events(timeline)
+        self.cashflow_summary.setText(
+            f"Cashflow now starts at today and moves forward. Green rows add to checking, soft red rows pull from checking, "
+            f"and blue rows are planned items that do not hit checking directly. Lowest projected balance in this window: {money(low)}."
+        )
+
+    def refresh_spending_summary(self, spending) -> None:
+        start = date.today().replace(day=1)
+        by_category: dict[str, float] = {}
+        by_account: dict[str, float] = {}
+        month_rows = []
+        for row in spending:
+            if start <= self.parse_date(row["spend_date"]) <= date.today():
+                amount = float(row["amount"] or 0)
+                month_rows.append(row)
+                by_category[row["category"]] = by_category.get(row["category"], 0) + amount
+                by_account[row["card_name"]] = by_account.get(row["card_name"], 0) + amount
+        total = sum(by_category.values())
+        top_category = max(by_category.items(), key=lambda item: item[1])[0] if by_category else "—"
+        top_account = max(by_account.items(), key=lambda item: item[1])[0] if by_account else "—"
+        average = total / len(month_rows) if month_rows else 0
+        for i in reversed(range(self.spending_metric_grid.count())):
+            widget = self.spending_metric_grid.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        metrics = (
+            Metric("Month spending", money(total), "Purchases tracked this month.", "blue"),
+            Metric("Purchases", str(len(month_rows)), "Rows counted this month.", "slate"),
+            Metric("Top category", top_category, "Biggest spending bucket so far.", "teal"),
+            Metric("Top account", top_account, "Card/account with the most tracked purchases.", "blue"),
+            Metric("Average purchase", money(average), "Average of this month's purchase rows.", "slate"),
+            Metric("Cashflow impact", "No", "Purchases track habits/card room; checking changes when paid.", "slate"),
+        )
+        for idx, metric in enumerate(metrics):
+            self.spending_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
 
     def refresh_insights(self, bills, cards, loans, transactions, spending) -> None:
         start = date.today().replace(day=1)
