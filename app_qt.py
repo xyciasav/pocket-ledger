@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.18"
+APP_VERSION = "0.2.19"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -274,11 +274,14 @@ class BarsWidget(QWidget):
         for row in self.rows[:8]:
             label, value, color = row[:3]
             children = row[3] if len(row) > 3 else []
+            row_max = float(row[4] or 0) if len(row) > 4 else max_value
+            row_max = row_max or max_value
             painter.setPen(QColor("#0f172a"))
             painter.drawText(20, y, label)
             painter.drawText(self.width() - 140, y, money(value))
             y += 12
-            width = int((self.width() - 190) * (value / max_value))
+            ratio = max(0.0, min(1.0, float(value or 0) / row_max))
+            width = int((self.width() - 190) * ratio)
             painter.setBrush(QColor("#e2e8f0"))
             painter.setPen(Qt.NoPen)
             painter.drawRoundedRect(20, y, self.width() - 190, 14, 7, 7)
@@ -1009,15 +1012,18 @@ class PocketLedgerQt(QMainWindow):
                 max(0.0, available),
                 palette[idx % len(palette)],
                 [("Current balance", balance), ("Credit limit", limit), ("Minimum due", float(row["minimum_payment"] or 0))],
+                limit,
             ))
         loan_rows = []
         for idx, row in enumerate(loans):
             remaining = self.loan_remaining(row)
+            original = self.loan_original_amount(row)
             loan_rows.append((
                 row["name"],
                 remaining,
                 palette[idx % len(palette)],
-                [("Monthly payment", float(row["payment"] or 0)), ("Extra paid", float(row["extra_payment"] or 0)), ("Original amount", self.loan_original_amount(row))],
+                [("Remaining balance", remaining), ("Monthly payment", float(row["payment"] or 0)), ("Original amount", original), ("Extra paid", float(row["extra_payment"] or 0))],
+                original,
             ))
         self.card_debt_bars.set_rows(sorted(card_rows, key=lambda row: row[1], reverse=True))
         self.loan_debt_bars.set_rows(sorted(loan_rows, key=lambda row: row[1], reverse=True))
