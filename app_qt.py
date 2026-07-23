@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.27"
+APP_VERSION = "0.2.28"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -572,7 +572,7 @@ class PocketLedgerQt(QMainWindow):
         layout.addWidget(watch)
         layout.addWidget(self.card_frame("Next moves", self.cashflow_visual))
         self.cashflow_table = self.table(("Date", "Type", "Name", "Amount", "Running cash"))
-        layout.addWidget(self.card_frame("Detailed timeline", self.cashflow_table))
+        layout.addWidget(self.card_frame("Detailed timeline — recent past + forecast", self.cashflow_table))
         return page
 
     def setup_page(self) -> QWidget:
@@ -1009,12 +1009,23 @@ class PocketLedgerQt(QMainWindow):
         self.set_table(self.spending_table, spending, lambda r: (r["spend_date"], r["card_name"], r["description"], r["category"], money(r["amount"]), "No"))
         self.refresh_cash_activity_summary(transactions)
 
-        timeline = self.upcoming_events(bills, income, cards, loans, transactions, cash_today, today + timedelta(days=1), today + timedelta(days=60))
-        timeline.insert(0, {"id": 0, "date": today.isoformat(), "kind": "Today", "name": "Starting cash", "amount": 0, "running": cash_today})
-        self.set_table(self.cashflow_table, timeline, lambda r: (r["date"], r["kind"], r["name"], signed_money(r["amount"]), money(r["running"])))
+        future_timeline = self.upcoming_events(bills, income, cards, loans, transactions, cash_today, today + timedelta(days=1), today + timedelta(days=60))
+        future_timeline.insert(0, {"id": 0, "date": today.isoformat(), "kind": "Today", "name": "Current cash", "amount": 0, "running": cash_today})
+        timeline_start = max(change_start, today - timedelta(days=21))
+        timeline_start_cash = float(cash["starting_balance"] or 0)
+        if timeline_start > change_start:
+            before_timeline = timeline_start - timedelta(days=1)
+            timeline_start_cash += self.scheduled_income_between(income, change_start, before_timeline)
+            timeline_start_cash += sum(row["amount"] for row in transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= before_timeline)
+            timeline_start_cash -= self.scheduled_checking_outflow_between(bills, cards, loans, change_start, before_timeline)
+            timeline_start_cash -= self.transaction_total_between(transactions, change_start, before_timeline)
+        detailed_timeline = self.upcoming_events(bills, income, cards, loans, transactions, timeline_start_cash, timeline_start, today + timedelta(days=60))
+        detailed_timeline.insert(0, {"id": 0, "date": timeline_start.isoformat(), "kind": "Lookback start", "name": "Running cash from reset", "amount": 0, "running": timeline_start_cash})
+        detailed_timeline.append({"id": -1, "date": today.isoformat(), "kind": "Today", "name": "Current cash", "amount": 0, "running": cash_today})
+        self.set_table(self.cashflow_table, detailed_timeline, lambda r: (r["date"], r["kind"], r["name"], signed_money(r["amount"]), money(r["running"])))
         self.cashflow_table.sortItems(0, Qt.AscendingOrder)
         self.color_cashflow_table()
-        self.refresh_cashflow_summary(timeline, cash_today)
+        self.refresh_cashflow_summary(future_timeline, cash_today)
         self.refresh_spending_summary(spending)
         room = self.spending_room_periods(bills, income, cards, loans, cash_today, today)
         self.set_table(self.room_table, room, lambda r: (r["period"], money(r["starting"]), money(r["income"]), money(r["due"]), money(r["after"]), money(r["safe"]), money(r["daily"])))
