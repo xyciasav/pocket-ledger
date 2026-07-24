@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.43"
+APP_VERSION = "0.2.44"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -567,6 +567,10 @@ class PocketLedgerQt(QMainWindow):
         self.update_status = QLabel("Not checked yet.")
         self.export_status = QLabel("No export run yet.")
         self.current_ledger_label = QLabel()
+        self.overview_account_bars = BarsWidget()
+        self.overview_obligation_bars = BarsWidget()
+        self.overview_timeline = TimelineWidget()
+        self.overview_watch_label = QLabel()
         self._build()
         self.refresh_all()
 
@@ -667,13 +671,10 @@ class PocketLedgerQt(QMainWindow):
         return scroll, layout
 
     def overview_page(self) -> QWidget:
-        page, layout = self.shell("Overview", "A cleaner view of checking cash, card room, loan pressure, and upcoming cashflow.")
+        page, layout = self.shell("Overview", "Your command center: cash accounts, next bills, spending room, and warning signs.")
         self.metric_grid = QGridLayout()
         self.metric_grid.setSpacing(14)
         layout.addLayout(self.metric_grid)
-        self.account_label = QLabel()
-        self.account_label.setObjectName("cardText")
-        self.account_label.setWordWrap(True)
         reset_row = self.action_strip()
         set_cash = QPushButton("Set starting cash")
         set_cash.setObjectName("primary")
@@ -684,6 +685,25 @@ class PocketLedgerQt(QMainWindow):
         reset_row.addWidget(reconcile_button)
         reset_row.addStretch()
         layout.addWidget(reset_row)
+        overview_row = QHBoxLayout()
+        self.overview_account_bars.setMinimumHeight(330)
+        self.overview_obligation_bars.setMinimumHeight(330)
+        overview_row.addWidget(self.card_frame("Accounts at a glance", self.overview_account_bars), 1)
+        overview_row.addWidget(self.card_frame("This month's money pressure", self.overview_obligation_bars), 1)
+        layout.addLayout(overview_row)
+        timeline_row = QHBoxLayout()
+        self.overview_timeline.setMinimumHeight(280)
+        timeline_row.addWidget(self.card_frame("Next money moves", self.overview_timeline), 2)
+        self.overview_watch_label.setObjectName("cardText")
+        self.overview_watch_label.setWordWrap(True)
+        timeline_row.addWidget(self.card_frame("What to watch", self.overview_watch_label), 1)
+        layout.addLayout(timeline_row)
+        self.overview_bills_table = self.table(("Date", "Type", "Name", "Amount", "Running cash"))
+        self.overview_bills_table.setMinimumHeight(240)
+        layout.addWidget(self.card_frame("Upcoming bills and deposits", self.overview_bills_table))
+        self.account_label = QLabel()
+        self.account_label.setObjectName("cardText")
+        self.account_label.setWordWrap(True)
         self.reconcile_label.setObjectName("cardText")
         self.reconcile_label.setWordWrap(True)
         self.reconcile_history_table = self.table(("Date", "Expected", "Actual", "Difference", "Notes"))
@@ -1295,6 +1315,7 @@ class PocketLedgerQt(QMainWindow):
         self.set_table(self.cashflow_table, detailed_timeline, lambda r: (r["date"], r["kind"], r["name"], signed_money(r["amount"]), money(r["running"]) if r["running"] is not None else "— before reset"))
         self.cashflow_table.sortItems(0, Qt.AscendingOrder)
         self.color_cashflow_table()
+        self.refresh_overview(cash_accounts, bills, income, cards, loans, transactions, spending, cash_today, future_timeline, today)
         self.refresh_cashflow_summary(future_timeline, cash_today)
         self.refresh_spending_summary(spending)
         room = self.spending_room_periods(bills, income, cards, loans, cash_today, today)
@@ -1317,6 +1338,69 @@ class PocketLedgerQt(QMainWindow):
                 if item:
                     item.setBackground(background)
                     item.setForeground(QColor("#0f172a"))
+
+    def refresh_overview(self, cash_accounts, bills, income, cards, loans, transactions, spending, cash_today: float, future_timeline: list[dict], today: date) -> None:
+        palette = ["#2563eb", "#0f766e", "#8b5cf6", "#f59e0b", "#06b6d4", "#ef4444", "#22c55e"]
+        account_balances = self.cash_account_balances(cash_accounts, bills, income, cards, loans, transactions, spending, today)
+        account_max = max([abs(value) for _name, value in account_balances] + [1])
+        self.overview_account_bars.set_rows([
+            (name, value, palette[idx % len(palette)], [("Estimated balance", value)], account_max)
+            for idx, (name, value) in enumerate(account_balances)
+        ])
+
+        month_start = today.replace(day=1)
+        month_end = date(today.year, today.month, calendar.monthrange(today.year, today.month)[1])
+        monthly_income = self.scheduled_income_between(income, month_start, month_end)
+        bank_bills = sum(float(row["amount"] or 0) for row in bills if is_bank_paid(row["paid_from"]) for _d in self.dates_between(row["due_day"], month_start, month_end))
+        card_bills = sum(float(row["amount"] or 0) for row in bills if not is_bank_paid(row["paid_from"]) for _d in self.dates_between(row["due_day"], month_start, month_end))
+        card_minimums = sum(float(row["minimum_payment"] or 0) for row in cards for _d in self.dates_between(row["due_day"], month_start, month_end))
+        loan_payments = sum(float(row["payment"] or 0) for row in loans for _d in self.dates_between(row["due_day"], month_start, month_end))
+        month_spending = sum(float(row["amount"] or 0) for row in spending if month_start <= self.parse_date(row["spend_date"]) <= today)
+        pressure_total = bank_bills + card_bills + card_minimums + loan_payments + month_spending
+        pressure_max = max(monthly_income, pressure_total, 1)
+        self.overview_obligation_bars.set_rows([
+            ("Income planned", monthly_income, "#16a34a", [("Scheduled deposits", monthly_income)], pressure_max),
+            ("Bank-paid bills", bank_bills, "#ef4444", [("Hits checking directly", bank_bills)], pressure_max),
+            ("Card-paid bills", card_bills, "#0284c7", [("Tracked obligations, paid when card is paid", card_bills)], pressure_max),
+            ("Debt payments", card_minimums + loan_payments, "#8b5cf6", [("Card minimums", card_minimums), ("Loan / mortgage payments", loan_payments)], pressure_max),
+            ("Tracked spending", month_spending, "#f59e0b", [("Spending page purchases this month", month_spending)], pressure_max),
+        ])
+
+        preview_events = [row for row in future_timeline if row["kind"] != "Today"][:8]
+        self.overview_timeline.set_events(preview_events)
+        upcoming_table_rows = [row for row in future_timeline if row["kind"] != "Today"][:16]
+        self.set_table(
+            self.overview_bills_table,
+            upcoming_table_rows,
+            lambda r: (r["date"], r["kind"], r["name"], signed_money(r["amount"]), money(r["running"])),
+        )
+
+        low_cash = min([cash_today] + [float(row["running"] or 0) for row in future_timeline]) if future_timeline else cash_today
+        next_income = next((row for row in future_timeline if float(row["amount"] or 0) > 0), None)
+        next_outflow = next((row for row in future_timeline if float(row["amount"] or 0) < 0), None)
+        card_balance = sum(float(row["balance"] or 0) for row in cards)
+        card_limit = sum(float(row["credit_limit"] or 0) for row in cards)
+        card_room = card_limit - card_balance
+        income_after_pressure = monthly_income - pressure_total
+        room_rows = self.spending_room_periods(bills, income, cards, loans, cash_today, today)
+        first_room = room_rows[0] if room_rows else None
+        watch_lines = [
+            f"Lowest checking forecast in the next 60 days: {money(low_cash)}.",
+            f"This month after planned pressure: {money(income_after_pressure)} before any untracked cash spending.",
+        ]
+        if next_outflow:
+            watch_lines.append(f"Next money out: {next_outflow['date']} • {next_outflow['name']} • {money(abs(float(next_outflow['amount'] or 0)))}.")
+        if next_income:
+            watch_lines.append(f"Next money in: {next_income['date']} • {next_income['name']} • {money(float(next_income['amount'] or 0))}.")
+        if first_room:
+            watch_lines.append(f"Current spending-room window: {first_room['period']} has about {money(first_room['safe'])} safe, or {money(first_room['daily'])}/day.")
+        if cards:
+            watch_lines.append(f"Credit card room: {money(card_room)} available against {money(card_limit)} total limits.")
+        if low_cash < 0:
+            watch_lines.insert(0, "Warning: the visible forecast drops below $0.")
+        elif low_cash < 500:
+            watch_lines.insert(0, "Heads up: the visible forecast gets tight.")
+        self.overview_watch_label.setText("\n".join(f"• {line}" for line in watch_lines))
 
     def refresh_cashflow_summary(self, timeline: list[dict], cash_today: float) -> None:
         low = min([cash_today] + [float(row["running"] or 0) for row in timeline]) if timeline else cash_today
