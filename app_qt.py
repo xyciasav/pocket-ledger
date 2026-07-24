@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.40"
+APP_VERSION = "0.2.41"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -73,6 +73,40 @@ BANK_ACH = "Bank ACH / autopay"
 PAID_ELSEWHERE = "Credit card / elsewhere"
 PAYMENT_METHODS = (BANK_ACH, BANK_MANUAL, PAID_ELSEWHERE)
 CATEGORIES = ("Fixed", "Utilities", "Other")
+LEDGER_TYPES = ("Personal", "Business")
+PERSONAL_CATEGORIES = (
+    "Fixed",
+    "Utilities",
+    "Groceries",
+    "Dining",
+    "Gas & Transport",
+    "Shopping",
+    "Health",
+    "Entertainment",
+    "Bills",
+    "Debt",
+    "Other",
+)
+BUSINESS_CATEGORIES = (
+    "Bookings",
+    "Square",
+    "Marketing",
+    "Advertising",
+    "Supplies",
+    "Software",
+    "Equipment",
+    "Travel",
+    "Meals",
+    "Contractors",
+    "Insurance",
+    "Rent",
+    "Utilities",
+    "Taxes",
+    "Fees",
+    "Owner draw",
+    "Income",
+    "Other",
+)
 EXTRA_INCOME_CATEGORY = "Extra Income"
 TRANSFER_IN_CATEGORY = "Transfer In"
 TRANSFER_OUT_CATEGORY = "Transfer Out"
@@ -133,6 +167,10 @@ class Store:
             """
             CREATE TABLE IF NOT EXISTS ledgers (
                 id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, notes TEXT DEFAULT '');
+            CREATE TABLE IF NOT EXISTS categories (
+                id INTEGER PRIMARY KEY, ledger_id INTEGER NOT NULL DEFAULT 1,
+                name TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'Spending',
+                notes TEXT DEFAULT '', UNIQUE(ledger_id,name));
             CREATE TABLE IF NOT EXISTS cash_accounts (
                 id INTEGER PRIMARY KEY, ledger_id INTEGER NOT NULL DEFAULT 1,
                 name TEXT NOT NULL, account_type TEXT NOT NULL DEFAULT 'Bills checking',
@@ -181,6 +219,7 @@ class Store:
             """
         )
         self.conn.execute("INSERT OR IGNORE INTO ledgers(id,name,notes) VALUES(1,?,?)", (DEFAULT_LEDGER_NAME, "Default ledger"))
+        self.ensure_column("ledgers", "ledger_type", "TEXT NOT NULL DEFAULT 'Personal'")
         self.ensure_column("bills", "paid_from", f"TEXT NOT NULL DEFAULT '{BANK_MANUAL}'")
         self.ensure_column("bills", "related_card_id", "INTEGER")
         self.ensure_column("cash_accounts", "account_type", "TEXT NOT NULL DEFAULT 'Bills checking'")
@@ -192,6 +231,7 @@ class Store:
         self.ensure_column("loans", "extra_payment", "REAL NOT NULL DEFAULT 0")
         self.ensure_column("loans", "original_amount", "REAL NOT NULL DEFAULT 0")
         self.ensure_default_cash_account()
+        self.ensure_default_categories()
         self.conn.commit()
 
     def ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -260,6 +300,25 @@ class Store:
                 "INSERT INTO cash_accounts(ledger_id,name,account_type,starting_balance,start_date,notes) VALUES(?,?,?,?,?,?)",
                 (ledger["id"], DEFAULT_CASH_ACCOUNT_NAME, "Bills checking", 0, date.today().isoformat(), "Default cashflow account"),
             )
+
+    def ensure_default_categories(self) -> None:
+        for ledger in self.rows("SELECT id,ledger_type FROM ledgers"):
+            if self.one("SELECT id FROM categories WHERE ledger_id=? LIMIT 1", (ledger["id"],)):
+                defaults = ()
+            else:
+                defaults = BUSINESS_CATEGORIES if ledger["ledger_type"] == "Business" else PERSONAL_CATEGORIES
+            used = []
+            for table in ("bills", "transactions", "cc_spending", "budget_targets"):
+                if table == "budget_targets":
+                    rows = self.rows(f"SELECT DISTINCT category FROM {table} WHERE ledger_id=?", (ledger["id"],))
+                else:
+                    rows = self.rows(f"SELECT DISTINCT category FROM {table} WHERE ledger_id=? AND category IS NOT NULL AND category<>''", (ledger["id"],))
+                used.extend(row["category"] for row in rows)
+            for category in tuple(dict.fromkeys(list(defaults) + used)):
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO categories(ledger_id,name,kind,notes) VALUES(?,?,?,?)",
+                    (ledger["id"], category, "Business" if ledger["ledger_type"] == "Business" else "Spending", ""),
+                )
 
 
 @dataclass
@@ -410,9 +469,12 @@ class RowDialog(QDialog):
                 widget.setDate(parsed)
             elif kind == "choice":
                 widget = QComboBox()
-                widget.addItems(list(options))
+                items = list(options)
                 value = str(initial.get(key, ""))
-                if value and value in options:
+                if value and value not in items:
+                    items.insert(0, value)
+                widget.addItems(items)
+                if value and value in items:
                     widget.setCurrentText(value)
             else:
                 raise ValueError(kind)
@@ -490,6 +552,7 @@ class PocketLedgerQt(QMainWindow):
         self.loan_debt_bars = BarsWidget()
         self.update_status = QLabel("Not checked yet.")
         self.export_status = QLabel("No export run yet.")
+        self.current_ledger_label = QLabel()
         self._build()
         self.refresh_all()
 
@@ -836,6 +899,30 @@ class PocketLedgerQt(QMainWindow):
         llm_settings_layout.addWidget(llm_settings_title)
         llm_settings_layout.addLayout(llm_button_row)
         layout.addWidget(llm_settings)
+        ledger_card = QFrame()
+        ledger_card.setObjectName("card")
+        ledger_layout = QVBoxLayout(ledger_card)
+        ledger_layout.setContentsMargins(18, 16, 18, 18)
+        ledger_title = QLabel("Current ledger")
+        ledger_title.setObjectName("sectionTitle")
+        self.current_ledger_label.setObjectName("cardText")
+        self.current_ledger_label.setWordWrap(True)
+        ledger_buttons = QHBoxLayout()
+        edit_ledger = QPushButton("Edit ledger")
+        edit_ledger.setObjectName("primary")
+        edit_ledger.clicked.connect(self.edit_current_ledger)
+        seed_business = QPushButton("Add business categories")
+        seed_business.clicked.connect(self.seed_business_categories)
+        ledger_buttons.addWidget(edit_ledger)
+        ledger_buttons.addWidget(seed_business)
+        ledger_buttons.addStretch()
+        ledger_layout.addWidget(ledger_title)
+        ledger_layout.addWidget(self.current_ledger_label)
+        ledger_layout.addLayout(ledger_buttons)
+        layout.addWidget(ledger_card)
+        self.categories_table = self.table(("Name", "Kind", "Notes"))
+        self.categories_table.setMinimumHeight(240)
+        layout.addWidget(self.entity_card("Categories for this ledger", self.categories_table, self.add_category, self.edit_category, self.delete_category))
         self.cash_accounts_table = self.table(("Name", "Type", "Starting", "Start date", "Notes"))
         self.cash_accounts_table.setMinimumHeight(220)
         layout.addWidget(self.entity_card("Cash accounts", self.cash_accounts_table, self.add_cash_account, self.edit_cash_account, self.delete_cash_account))
@@ -964,6 +1051,27 @@ class PocketLedgerQt(QMainWindow):
             self.ledger_id = int(ledger_id)
             self.store.set_setting("active_ledger_id", str(self.ledger_id))
             self.refresh_all()
+
+    def current_ledger(self):
+        if self.ledger_id == 0:
+            return None
+        return self.store.one("SELECT * FROM ledgers WHERE id=?", (self.ledger_id,))
+
+    def category_choices(self, include_system: bool = True) -> tuple[str, ...]:
+        if self.ledger_id == 0:
+            base = list(PERSONAL_CATEGORIES)
+        else:
+            rows = self.store.rows("SELECT name FROM categories WHERE ledger_id=? ORDER BY name", (self.ledger_id,))
+            base = [row["name"] for row in rows]
+            if not base:
+                ledger = self.current_ledger()
+                base = list(BUSINESS_CATEGORIES if ledger and ledger["ledger_type"] == "Business" else PERSONAL_CATEGORIES)
+        if include_system:
+            base += ["Credit Card Payment", EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY, TRANSFER_OUT_CATEGORY, "Debt", "Card minimums", "Loan / mortgage payments"]
+        return tuple(dict.fromkeys(base + ["Other"]))
+
+    def bill_category_choices(self) -> tuple[str, ...]:
+        return self.category_choices(include_system=False)
 
     def cash_account(self):
         if self.ledger_id == 0:
@@ -1099,6 +1207,11 @@ class PocketLedgerQt(QMainWindow):
         self.refresh_setup_summary(bills, income, cards, loans, today)
         self.set_table(self.cards_table, cards, lambda r: (r["name"], money(card_balances.get(r["id"], 0)), money(float(r["credit_limit"] or 0)-card_balances.get(r["id"], 0)), money(r["credit_limit"]), f"{r['apr']:.2f}%", money(r["minimum_payment"]), r["due_day"] or "—"))
         self.set_table(self.loans_table, loans, lambda r: (r["name"], r["lender"], money(self.loan_remaining(r)), money(self.loan_original_amount(r)), money(r["extra_payment"]), f"{r['apr']:.2f}%", money(r["payment"]), r["due_day"] or "—"))
+        ledger = self.current_ledger()
+        if ledger:
+            self.current_ledger_label.setText(f"{ledger['name']} • {ledger['ledger_type']} ledger")
+        categories = self.store.rows("SELECT * FROM categories WHERE ledger_id=? ORDER BY name", (self.ledger_id,))
+        self.set_table(self.categories_table, categories, lambda r: (r["name"], r["kind"], r["notes"] or ""))
         self.set_table(self.cash_accounts_table, cash_accounts, lambda r: (r["name"], r["account_type"], money(r["starting_balance"]), r["start_date"], r["notes"] or ""))
         self.set_table(self.budget_targets_table, budget_targets, lambda r: (r["category"], money(r["monthly_limit"]), r["notes"] or ""))
         self.refresh_accounts(cash_accounts, bills, income, cards, loans, transactions, spending, today)
@@ -1861,7 +1974,7 @@ class PocketLedgerQt(QMainWindow):
         )
         if not path_text:
             return
-        tables = ("ledgers", "cash_accounts", "bills", "income", "cards", "loans", "transactions", "cc_spending", "budget_targets", "reconciliations", "paid_scheduled", "scheduled_overrides", "settings")
+        tables = ("ledgers", "categories", "cash_accounts", "bills", "income", "cards", "loans", "transactions", "cc_spending", "budget_targets", "reconciliations", "paid_scheduled", "scheduled_overrides", "settings")
         data = {
             "app": "Pocket Ledger",
             "version": APP_VERSION,
@@ -2350,6 +2463,71 @@ class PocketLedgerQt(QMainWindow):
         QMessageBox.information(self, "Reconciliation saved", f"Expected: {money(expected)}\nActual: {money(actual)}\nDifference: {signed_money(difference)}")
         self.refresh_all()
 
+    def edit_current_ledger(self) -> None:
+        if not self.require_single_ledger():
+            return
+        ledger = self.current_ledger()
+        if not ledger:
+            return
+        values = self.simple_dialog(
+            "Current ledger",
+            [("name","text",()),("ledger_type","choice",LEDGER_TYPES),("notes","text",())],
+            dict(ledger),
+        )
+        if not values:
+            return
+        self.store.execute(
+            "UPDATE ledgers SET name=?,ledger_type=?,notes=? WHERE id=?",
+            (values["name"], values["ledger_type"], values["notes"], self.ledger_id),
+        )
+        if values["ledger_type"] == "Business":
+            self.add_default_categories(BUSINESS_CATEGORIES, "Business")
+        else:
+            self.add_default_categories(PERSONAL_CATEGORIES, "Spending")
+        self.refresh_all()
+
+    def add_default_categories(self, categories, kind: str) -> None:
+        for category in categories:
+            self.store.execute(
+                "INSERT OR IGNORE INTO categories(ledger_id,name,kind,notes) VALUES(?,?,?,?)",
+                (self.ledger_id, category, kind, ""),
+            )
+
+    def seed_business_categories(self) -> None:
+        if not self.require_single_ledger():
+            return
+        self.add_default_categories(BUSINESS_CATEGORIES, "Business")
+        self.store.execute("UPDATE ledgers SET ledger_type='Business' WHERE id=?", (self.ledger_id,))
+        self.refresh_all()
+
+    def add_category(self): self.category_dialog()
+    def edit_category(self):
+        row_id = self.selected_id(self.categories_table)
+        if row_id: self.category_dialog(self.store.one("SELECT * FROM categories WHERE id=? AND ledger_id=?", (row_id, self.ledger_id)))
+    def delete_category(self): self.delete_selected("categories", self.categories_table)
+    def category_dialog(self, row=None):
+        values = self.simple_dialog(
+            "Category",
+            [("name","text",()),("kind","choice",("Spending","Bill","Income","Business","Debt","Other")),("notes","text",())],
+            dict(row) if row else {"name": "", "kind": "Spending", "notes": ""},
+        )
+        if not values:
+            return
+        if not values["name"]:
+            QMessageBox.information(self, "Name required", "Category name is required.")
+            return
+        if row:
+            self.store.execute(
+                "UPDATE categories SET name=?,kind=?,notes=? WHERE id=? AND ledger_id=?",
+                (values["name"], values["kind"], values["notes"], row["id"], self.ledger_id),
+            )
+        else:
+            self.store.execute(
+                "INSERT INTO categories(ledger_id,name,kind,notes) VALUES(?,?,?,?) ON CONFLICT(ledger_id,name) DO UPDATE SET kind=excluded.kind,notes=excluded.notes",
+                (self.ledger_id, values["name"], values["kind"], values["notes"]),
+            )
+        self.refresh_all()
+
     def cash_account_choices(self) -> list[str]:
         return [f"{r['id']} - {r['name']} ({r['account_type']})" for r in self.store.rows("SELECT id,name,account_type FROM cash_accounts WHERE ledger_id=? ORDER BY name", (self.ledger_id,))]
 
@@ -2389,7 +2567,7 @@ class PocketLedgerQt(QMainWindow):
         if row and row["related_card_id"]:
             card = self.store.one("SELECT name FROM cards WHERE id=?", (row["related_card_id"],))
             initial["Card used"] = f"{row['related_card_id']} - {card['name'] if card else 'Unknown'}"
-        values = self.simple_dialog("Bill", [("name","text",()),("due_day","day",()),("amount","money",()),("category","choice",CATEGORIES),("paid_from","choice",PAYMENT_METHODS),("Card used","choice",card_choices),("notes","text",())], initial)
+        values = self.simple_dialog("Bill", [("name","text",()),("due_day","day",()),("amount","money",()),("category","choice",self.bill_category_choices()),("paid_from","choice",PAYMENT_METHODS),("Card used","choice",card_choices),("notes","text",())], initial)
         if not values: return
         related = int(values["Card used"].split(" - ", 1)[0]) if values["Card used"] else None
         if values["paid_from"] != PAID_ELSEWHERE: related = None
@@ -2444,7 +2622,7 @@ class PocketLedgerQt(QMainWindow):
         if row_id: self.budget_target_dialog(self.store.one("SELECT * FROM budget_targets WHERE id=? AND ledger_id=?", (row_id, self.ledger_id)))
     def delete_budget_target(self): self.delete_selected("budget_targets", self.budget_targets_table)
     def budget_target_dialog(self, row=None):
-        choices = tuple(dict.fromkeys(list(SPENDING_CATEGORIES) + list(CATEGORIES) + ["Debt", "Card minimums", "Loan / mortgage payments"]))
+        choices = self.category_choices(include_system=True)
         values = self.simple_dialog(
             "Monthly budget target",
             [("category","choice",choices),("monthly_limit","money",()),("notes","text",())],
@@ -2530,7 +2708,7 @@ class PocketLedgerQt(QMainWindow):
             initial["Credit card paid"] = f"{initial['related_card_id']} - {card['name'] if card else 'Unknown'}"
         elif initial.get("category") == "Credit Card Payment" and len(card_choices) > 1:
             initial["Credit card paid"] = card_choices[1]
-        values = self.simple_dialog("Checking cash activity", [("trans_date","date",()),("Account","choice",account_choices),("description","text",()),("amount","money",()),("category","choice",SPENDING_CATEGORIES),("Credit card paid","choice",card_choices)], initial)
+        values = self.simple_dialog("Checking cash activity", [("trans_date","date",()),("Account","choice",account_choices),("description","text",()),("amount","money",()),("category","choice",self.category_choices(include_system=True)),("Credit card paid","choice",card_choices)], initial)
         if not values: return
         account_id = int(values["Account"].split(" - ", 1)[0]) if values.get("Account") else cash["id"]
         related = int(values["Credit card paid"].split(" - ", 1)[0]) if values["Credit card paid"] else None
@@ -2560,7 +2738,7 @@ class PocketLedgerQt(QMainWindow):
             initial["Account"] = f"Account: {row['account_id']} - {acct['name'] if acct else 'Unknown'} ({acct['account_type'] if acct else 'Other'})"
         else:
             initial["Account"] = account_choices[0]
-        values = self.simple_dialog("Purchase", [("spend_date","date",()),("Account","choice",account_choices),("description","text",()),("amount","money",()),("category","choice",SPENDING_CATEGORIES),("notes","text",())], initial)
+        values = self.simple_dialog("Purchase", [("spend_date","date",()),("Account","choice",account_choices),("description","text",()),("amount","money",()),("category","choice",self.category_choices(include_system=False)),("notes","text",())], initial)
         if not values: return
         account_choice = values["Account"]
         card_id = int(account_choice.split(": ", 1)[1].split(" - ", 1)[0]) if account_choice.startswith("Card:") else None
