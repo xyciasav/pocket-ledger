@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.37"
+APP_VERSION = "0.2.38"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -1232,8 +1232,8 @@ class PocketLedgerQt(QMainWindow):
         month_rows = [row for row in transactions if start <= self.parse_date(row["trans_date"]) <= date.today()]
         money_in = sum(float(row["amount"] or 0) for row in month_rows if row["category"] in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY))
         card_payments = sum(float(row["amount"] or 0) for row in month_rows if row["category"] == "Credit Card Payment")
-        transfers = sum(float(row["amount"] or 0) for row in month_rows if row["category"] in CASHFLOW_NEUTRAL_CATEGORIES)
-        money_out = sum(float(row["amount"] or 0) for row in month_rows if row["category"] not in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY, "Credit Card Payment"))
+        transfers = sum(float(row["amount"] or 0) for row in month_rows if row["category"] == TRANSFER_OUT_CATEGORY)
+        money_out = sum(float(row["amount"] or 0) for row in month_rows if row["category"] not in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY, TRANSFER_OUT_CATEGORY, "Credit Card Payment"))
         for i in reversed(range(self.cash_activity_metric_grid.count())):
             widget = self.cash_activity_metric_grid.itemAt(i).widget()
             if widget:
@@ -1259,6 +1259,7 @@ class PocketLedgerQt(QMainWindow):
         account_rows = []
         activity_rows = []
         total_balance = 0.0
+        bills_balance = 0.0
         spending_balance = 0.0
         savings_balance = 0.0
         for account in cash_accounts:
@@ -1284,6 +1285,8 @@ class PocketLedgerQt(QMainWindow):
             purchases = sum(float(row["amount"] or 0) for row in month_spending)
 
             total_balance += balance
+            if account["account_type"] == "Bills checking":
+                bills_balance += balance
             if account["account_type"] == "Spending checking":
                 spending_balance += balance
             if account["account_type"] == "Savings":
@@ -1329,12 +1332,13 @@ class PocketLedgerQt(QMainWindow):
                 widget.setParent(None)
         metrics = (
             Metric("Total cash accounts", money(total_balance), "Estimated across checking, spending checking, savings, and other cash accounts.", "teal"),
+            Metric("Bills checking", money(bills_balance), "Main checking account used for the Cashflow forecast.", "teal"),
             Metric("Spending checking", money(spending_balance), "Estimated money available in accounts marked Spending checking.", "blue"),
             Metric("Savings", money(savings_balance), "Estimated money held in savings accounts.", "teal"),
             Metric("Accounts tracked", str(len(account_rows)), "Cash accounts in this ledger.", "slate"),
         )
         for idx, metric in enumerate(metrics):
-            self.accounts_metric_grid.addWidget(MetricCard(metric), idx // 4, idx % 4)
+            self.accounts_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
         self.accounts_summary.setText(
             "Bills checking is the account Cashflow forecasts with scheduled income, bills, card minimums, and loan payments. "
             "Spending checking and savings are tracked from their reset balance plus transfers, manual activity, and purchases assigned to that account. "
