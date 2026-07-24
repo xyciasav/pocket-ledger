@@ -24,7 +24,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -55,13 +55,14 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.34"
+APP_VERSION = "0.2.35"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
 APP_DIR = Path.home() / "PocketLedger"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = APP_DIR / "budget.db"
+ICON_RELATIVE_PATH = Path("assets") / "pocket_ledger_icon.ico"
 
 DEFAULT_LEDGER_NAME = "Personal"
 DEFAULT_CASH_ACCOUNT_NAME = "Main checking"
@@ -110,6 +111,11 @@ def parse_money_text(value: object) -> float:
     if cleaned in ("", "-", ".", "-."):
         return 0.0
     return float(cleaned)
+
+
+def bundled_path(relative_path: Path) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / relative_path
 
 
 def is_bank_paid(method: str | None) -> bool:
@@ -444,6 +450,9 @@ class PocketLedgerQt(QMainWindow):
         self.store = Store()
         self.ledger_id = self.store.active_ledger_id()
         self.setWindowTitle(f"Pocket Ledger Qt Preview {APP_VERSION}")
+        icon_path = bundled_path(ICON_RELATIVE_PATH)
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1800, 1050)
         self.setMinimumSize(1400, 820)
         self.nav_buttons: list[QPushButton] = []
@@ -2536,12 +2545,18 @@ QTableWidget::item:selected { background: #e0f2fe; color: #0f172a; }
 def main() -> int:
     if "--self-test-qt" in sys.argv:
         app = QApplication(sys.argv)
+        icon_path = bundled_path(ICON_RELATIVE_PATH)
+        if icon_path.exists():
+            app.setWindowIcon(QIcon(str(icon_path)))
         window = PocketLedgerQt()
         window.refresh_all()
         print("qt ok")
         window.close()
         return 0
     app = QApplication(sys.argv)
+    icon_path = bundled_path(ICON_RELATIVE_PATH)
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     window = PocketLedgerQt()
     window.show()
     window.go("Overview")
