@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.33"
+APP_VERSION = "0.2.34"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -100,6 +100,16 @@ def signed_money(value: float | int | None) -> str:
     amount = float(value or 0)
     sign = "+" if amount > 0 else "-" if amount < 0 else ""
     return f"{sign}${abs(amount):,.2f}"
+
+
+def parse_money_text(value: object) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    cleaned = re.sub(r"[^0-9.\-]", "", text)
+    if cleaned in ("", "-", ".", "-."):
+        return 0.0
+    return float(cleaned)
 
 
 def is_bank_paid(method: str | None) -> bool:
@@ -364,6 +374,7 @@ class RowDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.widgets = {}
+        self.kinds = {}
         self.setMinimumWidth(420)
         initial = initial or {}
         layout = QVBoxLayout(self)
@@ -372,11 +383,9 @@ class RowDialog(QDialog):
             if kind == "text":
                 widget = QLineEdit(str(initial.get(key, "")))
             elif kind == "money":
-                widget = QDoubleSpinBox()
-                widget.setMaximum(100_000_000)
-                widget.setDecimals(2)
-                widget.setPrefix("$")
-                widget.setValue(float(initial.get(key, 0) or 0))
+                widget = QLineEdit(money(initial.get(key, 0)))
+                widget.setPlaceholderText("500.00")
+                widget.selectAll()
             elif kind == "percent":
                 widget = QDoubleSpinBox()
                 widget.setMaximum(200)
@@ -402,6 +411,7 @@ class RowDialog(QDialog):
             else:
                 raise ValueError(kind)
             self.widgets[key] = widget
+            self.kinds[key] = kind
             form.addRow(key, widget)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -412,7 +422,10 @@ class RowDialog(QDialog):
     def values(self) -> dict:
         out = {}
         for key, widget in self.widgets.items():
-            if isinstance(widget, QLineEdit):
+            kind = self.kinds.get(key)
+            if kind == "money" and isinstance(widget, QLineEdit):
+                out[key] = parse_money_text(widget.text())
+            elif isinstance(widget, QLineEdit):
                 out[key] = widget.text().strip()
             elif isinstance(widget, QDoubleSpinBox):
                 out[key] = widget.value()
