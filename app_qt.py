@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.44"
+APP_VERSION = "0.2.45"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -671,7 +671,7 @@ class PocketLedgerQt(QMainWindow):
         return scroll, layout
 
     def overview_page(self) -> QWidget:
-        page, layout = self.shell("Overview", "Your command center: cash accounts, next bills, spending room, and warning signs.")
+        page, layout = self.shell("Overview", "Your command center: cash accounts, next bills, variable spending, and warning signs.")
         self.metric_grid = QGridLayout()
         self.metric_grid.setSpacing(14)
         layout.addLayout(self.metric_grid)
@@ -709,8 +709,8 @@ class PocketLedgerQt(QMainWindow):
         self.reconcile_history_table = self.table(("Date", "Expected", "Actual", "Difference", "Notes"))
         self.reconcile_history_table.setMinimumHeight(160)
         layout.addWidget(self.card_frame("Recent reconciliations", self.reconcile_history_table))
-        self.room_table = self.table(("Period", "Starting", "Income", "Due/planned", "After bills", "Safe", "Per day"))
-        layout.addWidget(self.card_frame("Spending room", self.room_table))
+        self.room_table = self.table(("Month", "Variable budget", "Spent so far", "Remaining", "Days left", "Per day", "Projected"))
+        layout.addWidget(self.card_frame("Monthly variable spending", self.room_table))
         layout.addStretch()
         return page
 
@@ -1318,8 +1318,8 @@ class PocketLedgerQt(QMainWindow):
         self.refresh_overview(cash_accounts, bills, income, cards, loans, transactions, spending, cash_today, future_timeline, today)
         self.refresh_cashflow_summary(future_timeline, cash_today)
         self.refresh_spending_summary(spending)
-        room = self.spending_room_periods(bills, income, cards, loans, cash_today, today)
-        self.set_table(self.room_table, room, lambda r: (r["period"], money(r["starting"]), money(r["income"]), money(r["due"]), money(r["after"]), money(r["safe"]), money(r["daily"])))
+        monthly_allowance = self.monthly_variable_spending(bills, income, cards, loans, spending, today)
+        self.set_table(self.room_table, monthly_allowance, lambda r: (r["month"], money(r["budget"]), money(r["spent"]), money(r["remaining"]), r["days_left"], money(r["daily"]), money(r["projected"])))
         self.refresh_reconciliation_summary(cash_today, reconciliations)
         self.refresh_insights(bills, cards, loans, transactions, spending, budget_targets, reimbursements)
         self.refresh_business_visibility()
@@ -1382,8 +1382,8 @@ class PocketLedgerQt(QMainWindow):
         card_limit = sum(float(row["credit_limit"] or 0) for row in cards)
         card_room = card_limit - card_balance
         income_after_pressure = monthly_income - pressure_total
-        room_rows = self.spending_room_periods(bills, income, cards, loans, cash_today, today)
-        first_room = room_rows[0] if room_rows else None
+        allowance_rows = self.monthly_variable_spending(bills, income, cards, loans, spending, today)
+        allowance = allowance_rows[0] if allowance_rows else None
         watch_lines = [
             f"Lowest checking forecast in the next 60 days: {money(low_cash)}.",
             f"This month after planned pressure: {money(income_after_pressure)} before any untracked cash spending.",
@@ -1392,8 +1392,8 @@ class PocketLedgerQt(QMainWindow):
             watch_lines.append(f"Next money out: {next_outflow['date']} • {next_outflow['name']} • {money(abs(float(next_outflow['amount'] or 0)))}.")
         if next_income:
             watch_lines.append(f"Next money in: {next_income['date']} • {next_income['name']} • {money(float(next_income['amount'] or 0))}.")
-        if first_room:
-            watch_lines.append(f"Current spending-room window: {first_room['period']} has about {money(first_room['safe'])} safe, or {money(first_room['daily'])}/day.")
+        if allowance:
+            watch_lines.append(f"Monthly variable spending: {money(allowance['remaining'])} left for {allowance['month']}, or {money(allowance['daily'])}/day.")
         if cards:
             watch_lines.append(f"Credit card room: {money(card_room)} available against {money(card_limit)} total limits.")
         if low_cash < 0:
@@ -1769,7 +1769,7 @@ class PocketLedgerQt(QMainWindow):
             Metric("Debt payments", money(debt_payment_total), "Card minimums plus loans/mortgages from the Debt page.", "blue"),
             Metric("Next due", money(next_due[2]) if next_due else "—", f"{next_due[0]:%b %d} · {next_due[1]} · {next_due[3]}" if next_due else "No upcoming bill or debt payment found.", "slate"),
         )
-        positions = ((0, 0, 1, 1), (0, 1, 1, 1), (0, 2, 1, 1), (1, 0, 1, 1), (1, 1, 1, 1), (1, 2, 1, 1), (2, 0, 1, 1))
+        positions = ((0, 0, 1, 1), (0, 1, 1, 1), (0, 2, 1, 1), (0, 3, 1, 1), (1, 0, 1, 1), (1, 1, 1, 1), (1, 2, 1, 2))
         for metric, position in zip(metrics, positions):
             self.setup_metric_grid.addWidget(MetricCard(metric), *position)
         next_income_text = f" Next income: {next_income[1]['name']} on {next_income[0]:%b %d} for {money(next_income[1]['amount'])}." if next_income else ""
@@ -2068,6 +2068,37 @@ class PocketLedgerQt(QMainWindow):
             rows.append({"id": idx + 1, "date": d.isoformat(), "kind": kind, "name": name, "amount": amount, "running": running})
         return rows
 
+    def monthly_variable_spending(self, bills, income, cards, loans, spending, today: date) -> list[dict]:
+        start = today.replace(day=1)
+        end = date(today.year, today.month, calendar.monthrange(today.year, today.month)[1])
+        income_total = self.scheduled_income_between(income, start, end)
+        bill_total = sum(float(row["amount"] or 0) for row in bills for _d in self.dates_between(row["due_day"], start, end))
+        card_minimum_total = sum(float(row["minimum_payment"] or 0) for row in cards for _d in self.dates_between(row["due_day"], start, end))
+        loan_payment_total = sum(float(row["payment"] or 0) for row in loans for _d in self.dates_between(row["due_day"], start, end))
+        planned_obligations = bill_total + card_minimum_total + loan_payment_total
+        budget = income_total - planned_obligations
+        spent = sum(float(row["amount"] or 0) for row in spending if start <= self.parse_date(row["spend_date"]) <= today)
+        remaining = budget - spent
+        days_left = max(1, (end - today).days + 1)
+        month_days = calendar.monthrange(today.year, today.month)[1]
+        elapsed_days = max(1, today.day)
+        projected = spent / elapsed_days * month_days
+        return [{
+            "id": 1,
+            "month": f"{start:%B %Y}",
+            "income": income_total,
+            "bills": bill_total,
+            "card_minimums": card_minimum_total,
+            "loan_payments": loan_payment_total,
+            "obligations": planned_obligations,
+            "budget": budget,
+            "spent": spent,
+            "remaining": remaining,
+            "days_left": days_left,
+            "daily": remaining / days_left,
+            "projected": projected,
+        }]
+
     def spending_room_periods(self, bills, income, cards, loans, cash_today: float, today: date) -> list[dict]:
         pay_dates = []
         for row in income:
@@ -2363,7 +2394,7 @@ class PocketLedgerQt(QMainWindow):
         extra_income = sum(row["amount"] for row in cash_transactions if row["category"] in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY) and change_start <= self.parse_date(row["trans_date"]) <= today)
         cash_today = float(cash["starting_balance"] or 0) + income_received + extra_income - due_outflow - actual_spending
         timeline = self.upcoming_events(bills, income, cards, loans, cash_transactions, cash_spending, cash_today, today + timedelta(days=1), today + timedelta(days=60))
-        room = self.spending_room_periods(bills, income, cards, loans, cash_today, today)
+        monthly_allowance = self.monthly_variable_spending(bills, income, cards, loans, spending, today)
         low_cash = min([cash_today] + [float(row["running"] or 0) for row in timeline]) if timeline else cash_today
         next_income = next((row for row in timeline if float(row["amount"] or 0) > 0), None)
         next_outflow = next((row for row in timeline if float(row["amount"] or 0) < 0), None)
@@ -2436,7 +2467,7 @@ class PocketLedgerQt(QMainWindow):
                 "next_income": next_income,
                 "next_outflow": next_outflow,
                 "upcoming_events": timeline[:35],
-                "spending_room_periods": room,
+                "monthly_variable_spending": monthly_allowance,
             },
             "spending_by_category": dict(sorted(by_category.items(), key=lambda item: item[1], reverse=True)),
             "budget_targets": [
