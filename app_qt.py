@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.46"
+APP_VERSION = "0.2.47"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -811,6 +811,14 @@ class PocketLedgerQt(QMainWindow):
         page, layout = self.shell("Spending", "Purchase tracking for cards and direct spending. This is for habits, limits, and insights.")
         self.spending_metric_grid.setSpacing(14)
         layout.addLayout(self.spending_metric_grid)
+        spending_actions = self.action_strip()
+        payoff_btn = QPushButton("Pay selected card purchase")
+        payoff_btn.setObjectName("primary")
+        payoff_btn.setToolTip("Creates a matching Cash Activity card payment from checking/spending account for the selected credit-card purchase.")
+        payoff_btn.clicked.connect(self.pay_selected_card_purchase)
+        spending_actions.addWidget(payoff_btn)
+        spending_actions.addStretch()
+        layout.addWidget(spending_actions)
         self.spending_table = self.table(("Date", "Account", "Description", "Category", "Amount", "Cashflow?"))
         layout.addWidget(self.entity_card("Purchase tracker", self.spending_table, self.add_spending, self.edit_spending, self.delete_spending))
         return page
@@ -3077,6 +3085,53 @@ class PocketLedgerQt(QMainWindow):
         row_id = self.selected_id(self.spending_table)
         if row_id: self.spending_dialog(self.store.one("SELECT * FROM cc_spending WHERE id=? AND ledger_id=?", (row_id, self.ledger_id)))
     def delete_spending(self): self.delete_selected("cc_spending", self.spending_table)
+
+    def pay_selected_card_purchase(self) -> None:
+        if not self.require_single_ledger():
+            return
+        row_id = self.selected_id(self.spending_table)
+        if not row_id:
+            return
+        purchase = self.store.one("SELECT * FROM cc_spending WHERE id=? AND ledger_id=?", (row_id, self.ledger_id))
+        if not purchase:
+            return
+        if not purchase["card_id"]:
+            QMessageBox.information(self, "Cash purchase selected", "This purchase is already tied to a cash account, so there is no credit card to pay.")
+            return
+        source = f"Spending payoff:{row_id}"
+        existing = self.store.one("SELECT id,trans_date FROM transactions WHERE ledger_id=? AND source=?", (self.ledger_id, source))
+        if existing:
+            QMessageBox.information(self, "Already paid", f"This purchase already has a linked card payment from {existing['trans_date']}.")
+            return
+        account_choices = self.cash_account_choices()
+        if not account_choices:
+            QMessageBox.information(self, "Add a cash account", "Add a checking/spending cash account before paying a card purchase.")
+            return
+        card = self.store.one("SELECT name FROM cards WHERE id=? AND ledger_id=?", (purchase["card_id"], self.ledger_id))
+        card_name = card["name"] if card else "Credit card"
+        values = self.simple_dialog(
+            "Pay selected card purchase",
+            [("trans_date","date",()),("Account","choice",account_choices),("description","text",()),("amount","money",())],
+            {
+                "trans_date": date.today().isoformat(),
+                "Account": account_choices[0],
+                "description": f"Pay {card_name} for {purchase['description']}",
+                "amount": float(purchase["amount"] or 0),
+            },
+        )
+        if not values:
+            return
+        amount = float(values["amount"] or 0)
+        if amount <= 0:
+            QMessageBox.information(self, "Enter an amount", "Card payment amount must be greater than $0.")
+            return
+        account_id = int(values["Account"].split(" - ", 1)[0])
+        self.store.execute(
+            "INSERT INTO transactions(trans_date,description,amount,category,related_card_id,source,account_id,ledger_id) VALUES(?,?,?,?,?,?,?,?)",
+            (values["trans_date"], values["description"], amount, "Credit Card Payment", int(purchase["card_id"]), source, account_id, self.ledger_id),
+        )
+        self.refresh_all()
+
     def spending_dialog(self, row=None):
         card_choices = [f"Card: {r['id']} - {r['name']}" for r in self.store.rows("SELECT id,name FROM cards WHERE ledger_id=? ORDER BY name", (self.ledger_id,))]
         cash_choices = [f"Account: {r['id']} - {r['name']} ({r['account_type']})" for r in self.store.rows("SELECT id,name,account_type FROM cash_accounts WHERE ledger_id=? ORDER BY name", (self.ledger_id,))]
