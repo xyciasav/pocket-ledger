@@ -55,13 +55,15 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.41"
+APP_VERSION = "0.2.42"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
 APP_DIR = Path.home() / "PocketLedger"
 APP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = APP_DIR / "budget.db"
+RECEIPTS_DIR = APP_DIR / "receipts"
+RECEIPTS_DIR.mkdir(parents=True, exist_ok=True)
 ICON_RELATIVE_PATH = Path("assets") / "pocket_ledger_icon.ico"
 
 DEFAULT_LEDGER_NAME = "Personal"
@@ -104,9 +106,12 @@ BUSINESS_CATEGORIES = (
     "Taxes",
     "Fees",
     "Owner draw",
+    "Reimbursable expense",
+    "Owner reimbursement",
     "Income",
     "Other",
 )
+REIMBURSEMENT_STATUSES = ("Open", "Submitted", "Reimbursed", "Not reimbursable")
 EXTRA_INCOME_CATEGORY = "Extra Income"
 TRANSFER_IN_CATEGORY = "Transfer In"
 TRANSFER_OUT_CATEGORY = "Transfer Out"
@@ -216,6 +221,13 @@ class Store:
                 check_date TEXT NOT NULL, expected_balance REAL NOT NULL DEFAULT 0,
                 actual_balance REAL NOT NULL DEFAULT 0, difference REAL NOT NULL DEFAULT 0,
                 notes TEXT DEFAULT '');
+            CREATE TABLE IF NOT EXISTS reimbursements (
+                id INTEGER PRIMARY KEY, ledger_id INTEGER NOT NULL DEFAULT 1,
+                expense_date TEXT NOT NULL, description TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'Reimbursable expense',
+                amount REAL NOT NULL DEFAULT 0, paid_by TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'Open', reimbursed_date TEXT DEFAULT '',
+                receipt_path TEXT DEFAULT '', notes TEXT DEFAULT '');
             """
         )
         self.conn.execute("INSERT OR IGNORE INTO ledgers(id,name,notes) VALUES(1,?,?)", (DEFAULT_LEDGER_NAME, "Default ledger"))
@@ -223,7 +235,7 @@ class Store:
         self.ensure_column("bills", "paid_from", f"TEXT NOT NULL DEFAULT '{BANK_MANUAL}'")
         self.ensure_column("bills", "related_card_id", "INTEGER")
         self.ensure_column("cash_accounts", "account_type", "TEXT NOT NULL DEFAULT 'Bills checking'")
-        for table in ("bills", "income", "cards", "loans", "transactions", "cc_spending", "paid_scheduled", "scheduled_overrides", "budget_targets", "reconciliations"):
+        for table in ("bills", "income", "cards", "loans", "transactions", "cc_spending", "paid_scheduled", "scheduled_overrides", "budget_targets", "reconciliations", "reimbursements"):
             self.ensure_column(table, "ledger_id", "INTEGER NOT NULL DEFAULT 1")
         self.ensure_column("transactions", "account_id", "INTEGER")
         self.ensure_column("transactions", "related_card_id", "INTEGER")
@@ -537,6 +549,7 @@ class PocketLedgerQt(QMainWindow):
         self.cashflow_summary = QLabel()
         self.accounts_metric_grid = QGridLayout()
         self.accounts_summary = QLabel()
+        self.reimbursements_metric_grid = QGridLayout()
         self.spending_metric_grid = QGridLayout()
         self.cash_activity_metric_grid = QGridLayout()
         self.cash_activity_summary = QLabel()
@@ -574,6 +587,7 @@ class PocketLedgerQt(QMainWindow):
         self.add_page("Debt", self.debt_page())
         self.add_page("Cash Activity", self.cash_activity_page())
         self.add_page("Spending", self.spending_page())
+        self.add_page("Reimbursements", self.reimbursements_page())
         self.add_page("Insights", self.insights_page())
         self.add_page("Settings", self.settings_page())
 
@@ -597,7 +611,7 @@ class PocketLedgerQt(QMainWindow):
         self.ledger_combo.setObjectName("ledgerCombo")
         layout.addWidget(self.ledger_combo)
         layout.addSpacing(18)
-        for name in ("Overview", "Accounts", "Cashflow", "Bills + Income", "Debt", "Cash Activity", "Spending", "Insights", "Settings"):
+        for name in ("Overview", "Accounts", "Cashflow", "Bills + Income", "Debt", "Cash Activity", "Spending", "Reimbursements", "Insights", "Settings"):
             button = QPushButton(name)
             button.setObjectName("nav")
             button.clicked.connect(lambda _checked=False, n=name: self.go(n))
@@ -769,6 +783,33 @@ class PocketLedgerQt(QMainWindow):
         layout.addLayout(self.spending_metric_grid)
         self.spending_table = self.table(("Date", "Account", "Description", "Category", "Amount", "Cashflow?"))
         layout.addWidget(self.entity_card("Purchase tracker", self.spending_table, self.add_spending, self.edit_spending, self.delete_spending))
+        return page
+
+    def reimbursements_page(self) -> QWidget:
+        page, layout = self.shell("Reimbursements", "Track business expenses you personally paid and still need paid back.")
+        self.reimbursements_metric_grid.setSpacing(14)
+        layout.addLayout(self.reimbursements_metric_grid)
+        actions = self.action_strip()
+        add_btn = QPushButton("+ Add reimbursement")
+        add_btn.setObjectName("primary")
+        edit_btn = QPushButton("Edit")
+        attach_btn = QPushButton("Attach receipt")
+        open_btn = QPushButton("Open receipt")
+        paid_btn = QPushButton("Mark reimbursed")
+        delete_btn = QPushButton("Delete")
+        add_btn.clicked.connect(self.add_reimbursement)
+        edit_btn.clicked.connect(self.edit_reimbursement)
+        attach_btn.clicked.connect(self.attach_reimbursement_receipt)
+        open_btn.clicked.connect(self.open_reimbursement_receipt)
+        paid_btn.clicked.connect(self.mark_reimbursement_reimbursed)
+        delete_btn.clicked.connect(self.delete_reimbursement)
+        for button in (add_btn, edit_btn, attach_btn, open_btn, paid_btn, delete_btn):
+            actions.addWidget(button)
+        actions.addStretch()
+        layout.addWidget(actions)
+        self.reimbursements_table = self.table(("Date", "Description", "Category", "Amount", "Paid by", "Status", "Reimbursed", "Receipt", "Notes"))
+        self.reimbursements_table.setMinimumHeight(520)
+        layout.addWidget(self.card_frame("Owner reimbursements", self.reimbursements_table))
         return page
 
     def insights_page(self) -> QWidget:
@@ -1106,6 +1147,7 @@ class PocketLedgerQt(QMainWindow):
             loans = self.store.rows("SELECT * FROM loans ORDER BY ledger_id,due_day,name")
             budget_targets = self.store.rows("SELECT * FROM budget_targets ORDER BY ledger_id,category")
             reconciliations = self.store.rows("SELECT * FROM reconciliations ORDER BY check_date DESC,id DESC LIMIT 10")
+            reimbursements = self.store.rows("SELECT * FROM reimbursements ORDER BY ledger_id,expense_date DESC,id DESC")
             transactions = self.store.rows(
                 """
                 SELECT t.*, COALESCE(a.name, 'Checking') account_name, COALESCE(c.name,'') related_card_name
@@ -1133,6 +1175,7 @@ class PocketLedgerQt(QMainWindow):
             loans = self.store.rows("SELECT * FROM loans WHERE ledger_id=? ORDER BY due_day,name", (self.ledger_id,))
             budget_targets = self.store.rows("SELECT * FROM budget_targets WHERE ledger_id=? ORDER BY category", (self.ledger_id,))
             reconciliations = self.store.rows("SELECT * FROM reconciliations WHERE ledger_id=? ORDER BY check_date DESC,id DESC LIMIT 10", (self.ledger_id,))
+            reimbursements = self.store.rows("SELECT * FROM reimbursements WHERE ledger_id=? ORDER BY expense_date DESC,id DESC", (self.ledger_id,))
             transactions = self.store.rows(
                 """
                 SELECT t.*, COALESCE(a.name, ?) account_name, COALESCE(c.name,'') related_card_name
@@ -1157,11 +1200,11 @@ class PocketLedgerQt(QMainWindow):
                 """,
                 (self.ledger_id,),
             )
-        return cash, bills, income, cards, loans, transactions, spending, budget_targets, reconciliations
+        return cash, bills, income, cards, loans, transactions, spending, budget_targets, reconciliations, reimbursements
 
     def refresh_all(self) -> None:
         self.refresh_ledgers()
-        cash, bills, income, cards, loans, transactions, spending, budget_targets, reconciliations = self.rows()
+        cash, bills, income, cards, loans, transactions, spending, budget_targets, reconciliations, reimbursements = self.rows()
         today = date.today()
         start_date = self.parse_date(cash["start_date"])
         change_start = start_date + timedelta(days=1)
@@ -1210,7 +1253,9 @@ class PocketLedgerQt(QMainWindow):
         ledger = self.current_ledger()
         if ledger:
             self.current_ledger_label.setText(f"{ledger['name']} • {ledger['ledger_type']} ledger")
-        categories = self.store.rows("SELECT * FROM categories WHERE ledger_id=? ORDER BY name", (self.ledger_id,))
+        else:
+            self.current_ledger_label.setText("Choose a single ledger to edit its type and categories.")
+        categories = self.store.rows("SELECT * FROM categories WHERE ledger_id=? ORDER BY name", (self.ledger_id,)) if self.ledger_id else []
         self.set_table(self.categories_table, categories, lambda r: (r["name"], r["kind"], r["notes"] or ""))
         self.set_table(self.cash_accounts_table, cash_accounts, lambda r: (r["name"], r["account_type"], money(r["starting_balance"]), r["start_date"], r["notes"] or ""))
         self.set_table(self.budget_targets_table, budget_targets, lambda r: (r["category"], money(r["monthly_limit"]), r["notes"] or ""))
@@ -1218,6 +1263,7 @@ class PocketLedgerQt(QMainWindow):
         self.refresh_debt_summary(cards, loans)
         self.set_table(self.transactions_table, transactions, lambda r: (r["trans_date"], r["account_name"], r["description"], r["category"], r["related_card_name"] or "—", money(r["amount"])))
         self.set_table(self.spending_table, spending, lambda r: (r["spend_date"], f"{r['account_kind']}: {r['account_name']}", r["description"], r["category"], money(r["amount"]), "No"))
+        self.refresh_reimbursements(reimbursements)
         self.refresh_cash_activity_summary(transactions)
 
         future_timeline = self.upcoming_events(bills, income, cards, loans, cash_transactions, cash_spending, cash_today, today + timedelta(days=1), today + timedelta(days=60))
@@ -1238,7 +1284,7 @@ class PocketLedgerQt(QMainWindow):
         room = self.spending_room_periods(bills, income, cards, loans, cash_today, today)
         self.set_table(self.room_table, room, lambda r: (r["period"], money(r["starting"]), money(r["income"]), money(r["due"]), money(r["after"]), money(r["safe"]), money(r["daily"])))
         self.refresh_reconciliation_summary(cash_today, reconciliations)
-        self.refresh_insights(bills, cards, loans, transactions, spending, budget_targets)
+        self.refresh_insights(bills, cards, loans, transactions, spending, budget_targets, reimbursements)
 
     def color_cashflow_table(self) -> None:
         for row in range(self.cashflow_table.rowCount()):
@@ -1309,6 +1355,30 @@ class PocketLedgerQt(QMainWindow):
         )
         for idx, metric in enumerate(metrics):
             self.spending_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
+
+    def refresh_reimbursements(self, reimbursements) -> None:
+        open_total = sum(float(row["amount"] or 0) for row in reimbursements if row["status"] == "Open")
+        submitted_total = sum(float(row["amount"] or 0) for row in reimbursements if row["status"] == "Submitted")
+        reimbursed_total = sum(float(row["amount"] or 0) for row in reimbursements if row["status"] == "Reimbursed")
+        receipt_count = sum(1 for row in reimbursements if row["receipt_path"])
+        for i in reversed(range(self.reimbursements_metric_grid.count())):
+            widget = self.reimbursements_metric_grid.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        metrics = (
+            Metric("Business owes you", money(open_total + submitted_total), "Open plus submitted reimbursements still not paid back.", "blue"),
+            Metric("Open", money(open_total), "Personally paid items not submitted/paid yet.", "slate"),
+            Metric("Submitted", money(submitted_total), "Submitted but not reimbursed.", "teal"),
+            Metric("Reimbursed", money(reimbursed_total), "Already paid back.", "teal"),
+            Metric("Receipts attached", str(receipt_count), "Rows with a local receipt file saved.", "slate"),
+        )
+        for idx, metric in enumerate(metrics):
+            self.reimbursements_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
+        self.set_table(
+            self.reimbursements_table,
+            reimbursements,
+            lambda r: (r["expense_date"], r["description"], r["category"], money(r["amount"]), r["paid_by"] or "Owner", r["status"], r["reimbursed_date"] or "—", "Yes" if r["receipt_path"] else "No", r["notes"] or ""),
+        )
 
     def refresh_cash_activity_summary(self, transactions) -> None:
         start = date.today().replace(day=1)
@@ -1629,7 +1699,7 @@ class PocketLedgerQt(QMainWindow):
         self.update_insight_month_label()
         self.refresh_all()
 
-    def refresh_insights(self, bills, cards, loans, transactions, spending, budget_targets) -> None:
+    def refresh_insights(self, bills, cards, loans, transactions, spending, budget_targets, reimbursements) -> None:
         start = self.insight_month_start
         end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
         records = []
@@ -1641,6 +1711,10 @@ class PocketLedgerQt(QMainWindow):
             d = self.parse_date(row["spend_date"])
             if start <= d <= end:
                 records.append({"category": row["category"], "description": row["description"], "source": f"{row['account_kind']}: {row['account_name']}", "amount": float(row["amount"] or 0)})
+        for row in reimbursements:
+            d = self.parse_date(row["expense_date"])
+            if start <= d <= end and row["status"] != "Not reimbursable":
+                records.append({"category": row["category"], "description": row["description"], "source": f"Owner reimbursement: {row['status']}", "amount": float(row["amount"] or 0)})
         for bill in bills:
             for _d in self.dates_between(bill["due_day"], start, end):
                 source = "Bill from checking" if is_bank_paid(bill["paid_from"]) else "Bill on card"
@@ -1922,7 +1996,7 @@ class PocketLedgerQt(QMainWindow):
             return
         folder = Path(folder_text) / f"PocketLedger-export-{date.today().isoformat()}"
         folder.mkdir(parents=True, exist_ok=True)
-        cash, bills, income, cards, loans, transactions, spending, budget_targets, reconciliations = self.rows()
+        cash, bills, income, cards, loans, transactions, spending, budget_targets, reconciliations, reimbursements = self.rows()
         exports = {
             "cash_account.csv": [dict(cash)],
             "bills.csv": self.row_dicts(bills),
@@ -1931,11 +2005,20 @@ class PocketLedgerQt(QMainWindow):
             "loans.csv": self.row_dicts(loans),
             "cash_activity.csv": self.row_dicts(transactions),
             "spending.csv": self.row_dicts(spending),
+            "reimbursements.csv": self.row_dicts(reimbursements),
             "budget_targets.csv": self.row_dicts(budget_targets),
             "reconciliations.csv": self.row_dicts(reconciliations),
         }
         for name, rows in exports.items():
             self.write_csv(folder / name, rows)
+        receipt_rows = [row for row in reimbursements if row["receipt_path"]]
+        if receipt_rows:
+            receipt_folder = folder / "receipts"
+            receipt_folder.mkdir(parents=True, exist_ok=True)
+            for row in receipt_rows:
+                source = Path(row["receipt_path"])
+                if source.exists():
+                    shutil.copy2(source, receipt_folder / source.name)
         self.export_status.setText(f"Exported ledger CSVs to {folder}")
         QMessageBox.information(self, "Export complete", f"Ledger CSVs exported to:\n{folder}")
 
@@ -1948,7 +2031,7 @@ class PocketLedgerQt(QMainWindow):
         )
         if not path_text:
             return
-        cash, bills, income, cards, loans, transactions, spending, _budget_targets, _reconciliations = self.rows()
+        cash, bills, income, cards, loans, transactions, spending, _budget_targets, _reconciliations, _reimbursements = self.rows()
         today = date.today()
         start_date = self.parse_date(cash["start_date"])
         change_start = start_date + timedelta(days=1)
@@ -1974,7 +2057,7 @@ class PocketLedgerQt(QMainWindow):
         )
         if not path_text:
             return
-        tables = ("ledgers", "categories", "cash_accounts", "bills", "income", "cards", "loans", "transactions", "cc_spending", "budget_targets", "reconciliations", "paid_scheduled", "scheduled_overrides", "settings")
+        tables = ("ledgers", "categories", "cash_accounts", "bills", "income", "cards", "loans", "transactions", "cc_spending", "reimbursements", "budget_targets", "reconciliations", "paid_scheduled", "scheduled_overrides", "settings")
         data = {
             "app": "Pocket Ledger",
             "version": APP_VERSION,
@@ -2121,7 +2204,7 @@ class PocketLedgerQt(QMainWindow):
         return cleaned.strip() or "The local model returned only hidden reasoning. Try again or switch to a non-thinking/instruct model."
 
     def llm_month_summary(self) -> dict:
-        cash, bills, income, cards, loans, transactions, spending, budget_targets, _reconciliations = self.rows()
+        cash, bills, income, cards, loans, transactions, spending, budget_targets, _reconciliations, reimbursements = self.rows()
         today = date.today()
         start = self.insight_month_start
         end = date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
@@ -2138,6 +2221,15 @@ class PocketLedgerQt(QMainWindow):
                 by_account[row["account_name"]] = by_account.get(row["account_name"], 0) + amount
                 by_description[row["description"]] = by_description.get(row["description"], 0) + amount
                 purchases.append({"date": row["spend_date"], "account": row["account_name"], "description": row["description"], "category": row["category"], "amount": amount})
+        reimbursement_rows = []
+        for row in reimbursements:
+            d = self.parse_date(row["expense_date"])
+            if start <= d <= end and row["status"] != "Not reimbursable":
+                amount = float(row["amount"] or 0)
+                by_category[row["category"]] = by_category.get(row["category"], 0) + amount
+                by_account["Owner reimbursement"] = by_account.get("Owner reimbursement", 0) + amount
+                by_description[row["description"]] = by_description.get(row["description"], 0) + amount
+                reimbursement_rows.append({"date": row["expense_date"], "description": row["description"], "category": row["category"], "amount": amount, "paid_by": row["paid_by"], "status": row["status"], "has_receipt": bool(row["receipt_path"])})
         for row in transactions:
             d = self.parse_date(row["trans_date"])
             if start <= d <= end:
@@ -2245,6 +2337,8 @@ class PocketLedgerQt(QMainWindow):
             "biggest_category_increases_vs_prior_average": sorted(category_changes, key=lambda row: row["change"], reverse=True)[:12],
             "biggest_description_increases_vs_prior_average": sorted(description_changes, key=lambda row: row["change"], reverse=True)[:15],
             "top_purchases": sorted(purchases, key=lambda row: row["amount"], reverse=True)[:25],
+            "owner_reimbursements": reimbursement_rows,
+            "owner_reimbursement_outstanding": sum(row["amount"] for row in reimbursement_rows if row["status"] in ("Open", "Submitted")),
             "checking_activity": sorted(checking, key=lambda row: row["amount"], reverse=True)[:25],
             "recurring_bills": [{"name": row["name"], "category": row["category"], "paid_from": row["paid_from"], "amount": float(row["amount"] or 0), "due_day": row["due_day"]} for row in bills],
             "income": [{"name": row["name"], "amount": float(row["amount"] or 0), "pay_day": row["pay_day"]} for row in income],
@@ -2431,7 +2525,7 @@ class PocketLedgerQt(QMainWindow):
         self.refresh_all()
 
     def expected_cash_today(self) -> float:
-        cash, bills, income, cards, loans, transactions, spending, _budget_targets, _reconciliations = self.rows()
+        cash, bills, income, cards, loans, transactions, spending, _budget_targets, _reconciliations, _reimbursements = self.rows()
         today = date.today()
         start_date = self.parse_date(cash["start_date"])
         change_start = start_date + timedelta(days=1)
@@ -2746,6 +2840,98 @@ class PocketLedgerQt(QMainWindow):
         if row: self.store.execute("UPDATE cc_spending SET spend_date=?,card_id=?,account_id=?,description=?,amount=?,category=?,notes=? WHERE id=? AND ledger_id=?", (values["spend_date"], card_id, account_id, values["description"], values["amount"], values["category"], values["notes"], row["id"], self.ledger_id))
         else: self.store.execute("INSERT INTO cc_spending(spend_date,card_id,account_id,description,amount,category,notes,ledger_id) VALUES(?,?,?,?,?,?,?,?)", (values["spend_date"], card_id, account_id, values["description"], values["amount"], values["category"], values["notes"], self.ledger_id))
         self.refresh_all()
+
+    def add_reimbursement(self): self.reimbursement_dialog()
+    def edit_reimbursement(self):
+        if not self.require_single_ledger():
+            return
+        row_id = self.selected_id(self.reimbursements_table)
+        if row_id:
+            self.reimbursement_dialog(self.store.one("SELECT * FROM reimbursements WHERE id=? AND ledger_id=?", (row_id, self.ledger_id)))
+    def delete_reimbursement(self): self.delete_selected("reimbursements", self.reimbursements_table)
+    def reimbursement_dialog(self, row=None):
+        initial = dict(row) if row else {
+            "expense_date": date.today().isoformat(),
+            "category": "Reimbursable expense",
+            "paid_by": "Owner",
+            "status": "Open",
+            "reimbursed_date": "",
+        }
+        values = self.simple_dialog(
+            "Owner reimbursement",
+            [("expense_date","date",()),("description","text",()),("category","choice",self.category_choices(include_system=False)),("amount","money",()),("paid_by","text",()),("status","choice",REIMBURSEMENT_STATUSES),("reimbursed_date","text",()),("notes","text",())],
+            initial,
+        )
+        if not values:
+            return
+        if row:
+            self.store.execute(
+                "UPDATE reimbursements SET expense_date=?,description=?,category=?,amount=?,paid_by=?,status=?,reimbursed_date=?,notes=? WHERE id=? AND ledger_id=?",
+                (values["expense_date"], values["description"], values["category"], values["amount"], values["paid_by"], values["status"], values["reimbursed_date"], values["notes"], row["id"], self.ledger_id),
+            )
+        else:
+            self.store.execute(
+                "INSERT INTO reimbursements(ledger_id,expense_date,description,category,amount,paid_by,status,reimbursed_date,notes) VALUES(?,?,?,?,?,?,?,?,?)",
+                (self.ledger_id, values["expense_date"], values["description"], values["category"], values["amount"], values["paid_by"], values["status"], values["reimbursed_date"], values["notes"]),
+            )
+        self.refresh_all()
+
+    def mark_reimbursement_reimbursed(self) -> None:
+        if not self.require_single_ledger():
+            return
+        row_id = self.selected_id(self.reimbursements_table)
+        if not row_id:
+            return
+        self.store.execute(
+            "UPDATE reimbursements SET status='Reimbursed',reimbursed_date=? WHERE id=? AND ledger_id=?",
+            (date.today().isoformat(), row_id, self.ledger_id),
+        )
+        self.refresh_all()
+
+    def reimbursement_receipt_folder(self) -> Path:
+        folder = RECEIPTS_DIR / f"ledger_{self.ledger_id}"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def attach_reimbursement_receipt(self) -> None:
+        if not self.require_single_ledger():
+            return
+        row_id = self.selected_id(self.reimbursements_table)
+        if not row_id:
+            return
+        source, _ = QFileDialog.getOpenFileName(
+            self,
+            "Attach receipt",
+            str(Path.home() / "Downloads"),
+            "Receipt files (*.pdf *.png *.jpg *.jpeg *.webp *.heic);;All files (*.*)",
+        )
+        if not source:
+            return
+        source_path = Path(source)
+        safe_suffix = source_path.suffix or ".receipt"
+        destination = self.reimbursement_receipt_folder() / f"reimbursement_{row_id}{safe_suffix}"
+        shutil.copy2(source_path, destination)
+        self.store.execute(
+            "UPDATE reimbursements SET receipt_path=? WHERE id=? AND ledger_id=?",
+            (str(destination), row_id, self.ledger_id),
+        )
+        self.refresh_all()
+
+    def open_reimbursement_receipt(self) -> None:
+        if not self.require_single_ledger():
+            return
+        row_id = self.selected_id(self.reimbursements_table)
+        if not row_id:
+            return
+        row = self.store.one("SELECT receipt_path FROM reimbursements WHERE id=? AND ledger_id=?", (row_id, self.ledger_id))
+        if not row or not row["receipt_path"]:
+            QMessageBox.information(self, "No receipt", "This reimbursement does not have a receipt attached yet.")
+            return
+        path = Path(row["receipt_path"])
+        if not path.exists():
+            QMessageBox.information(self, "Receipt missing", f"The saved receipt file could not be found:\n{path}")
+            return
+        webbrowser.open(path.as_uri())
 
     def delete_selected(self, table: str, widget: QTableWidget) -> None:
         if not self.require_single_ledger():
