@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.39"
+APP_VERSION = "0.2.40"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -298,7 +298,7 @@ class BarsWidget(QWidget):
 
     def set_rows(self, rows: list[tuple]) -> None:
         self.rows = rows
-        line_count = sum(1 + min(5, len(row[3]) if len(row) > 3 else 0) for row in rows[:8])
+        line_count = sum(1 + (len(row[3]) if len(row) > 3 else 0) for row in rows)
         self.setMinimumHeight(max(280, 48 + line_count * 30))
         self.update()
 
@@ -312,7 +312,7 @@ class BarsWidget(QWidget):
             return
         max_value = max(float(row[1] or 0) for row in self.rows) or 1
         y = 22
-        for row in self.rows[:8]:
+        for row in self.rows:
             label, value, color = row[:3]
             children = row[3] if len(row) > 3 else []
             row_max = float(row[4] or 0) if len(row) > 4 else max_value
@@ -329,7 +329,7 @@ class BarsWidget(QWidget):
             painter.setBrush(QColor(color))
             painter.drawRoundedRect(20, y, width, 14, 7, 7)
             y += 28
-            for child_label, child_value in children[:5]:
+            for child_label, child_value in children:
                 painter.setPen(QColor("#64748b"))
                 painter.drawText(42, y, f"• {child_label}")
                 painter.drawText(self.width() - 140, y, money(child_value))
@@ -463,6 +463,8 @@ class PocketLedgerQt(QMainWindow):
         self.insight_source_bars = BarsWidget()
         self.budget_bars = BarsWidget()
         self.insight_metric_grid = QGridLayout()
+        self.insight_category_table = None
+        self.insight_source_table = None
         self.insight_detail_table = None
         self.llm_answer = QTextEdit()
         self.llm_status = QLabel("Ready to analyze your current ledger.")
@@ -736,9 +738,17 @@ class PocketLedgerQt(QMainWindow):
         chart_row.addWidget(self.card_frame("Category breakdown", self.insight_bars), 1)
         chart_row.addWidget(self.card_frame("Where it came from", self.insight_source_bars), 1)
         layout.addLayout(chart_row)
+        data_row = QHBoxLayout()
+        self.insight_category_table = self.table(("Category", "Total", "Items", "Largest item"))
+        self.insight_category_table.setMinimumHeight(260)
+        self.insight_source_table = self.table(("Source", "Total", "Items", "Largest item"))
+        self.insight_source_table.setMinimumHeight(260)
+        data_row.addWidget(self.card_frame("All categories", self.insight_category_table), 1)
+        data_row.addWidget(self.card_frame("All sources", self.insight_source_table), 1)
+        layout.addLayout(data_row)
         self.insight_detail_table = self.table(("Description", "Category", "Source", "Total", "Count"))
         self.insight_detail_table.setMinimumHeight(320)
-        layout.addWidget(self.card_frame("Top descriptions", self.insight_detail_table))
+        layout.addWidget(self.card_frame("All descriptions", self.insight_detail_table))
         llm_card = QFrame()
         llm_card.setObjectName("card")
         llm_layout = QVBoxLayout(llm_card)
@@ -1535,6 +1545,8 @@ class PocketLedgerQt(QMainWindow):
         source_children: dict[str, dict[str, float]] = {}
         details: dict[tuple[str, str, str], dict] = {}
         for row in records:
+            if float(row["amount"] or 0) <= 0:
+                continue
             by_category[row["category"]] = by_category.get(row["category"], 0) + row["amount"]
             by_source[row["source"]] = by_source.get(row["source"], 0) + row["amount"]
             category_children.setdefault(row["category"], {})
@@ -1549,8 +1561,28 @@ class PocketLedgerQt(QMainWindow):
         category_rows = sorted(by_category.items(), key=lambda item: item[1], reverse=True)
         source_rows = sorted(by_source.items(), key=lambda item: item[1], reverse=True)
         detail_rows = sorted(details.values(), key=lambda item: item["total"], reverse=True)
+        category_table_rows = []
+        for idx, (name, value) in enumerate(category_rows, start=1):
+            children = sorted(category_children.get(name, {}).items(), key=lambda child: child[1], reverse=True)
+            category_table_rows.append({
+                "id": idx,
+                "name": name,
+                "total": value,
+                "items": len(children),
+                "largest": children[0][0] if children else "—",
+            })
+        source_table_rows = []
+        for idx, (name, value) in enumerate(source_rows, start=1):
+            children = sorted(source_children.get(name, {}).items(), key=lambda child: child[1], reverse=True)
+            source_table_rows.append({
+                "id": idx,
+                "name": name,
+                "total": value,
+                "items": len(children),
+                "largest": children[0][0] if children else "—",
+            })
         total = sum(value for _name, value in category_rows)
-        count = len(records)
+        count = sum(int(row["count"] or 0) for row in detail_rows)
         top_category = category_rows[0][0] if category_rows else "—"
         avg = total / count if count else 0
         month_days = calendar.monthrange(start.year, start.month)[1]
@@ -1614,8 +1646,12 @@ class PocketLedgerQt(QMainWindow):
             )
             for idx, (name, value) in enumerate(source_rows)
         ])
+        if self.insight_category_table:
+            self.set_table(self.insight_category_table, category_table_rows, lambda r: (r["name"], money(r["total"]), r["items"], r["largest"]))
+        if self.insight_source_table:
+            self.set_table(self.insight_source_table, source_table_rows, lambda r: (r["name"], money(r["total"]), r["items"], r["largest"]))
         if self.insight_detail_table:
-            self.set_table(self.insight_detail_table, detail_rows[:20], lambda r: (r["description"], r["category"], r["source"], money(r["total"]), r["count"]))
+            self.set_table(self.insight_detail_table, detail_rows, lambda r: (r["description"], r["category"], r["source"], money(r["total"]), r["count"]))
 
     def parse_date(self, value: str | None) -> date:
         try:
