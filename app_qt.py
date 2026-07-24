@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.38"
+APP_VERSION = "0.2.39"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -566,10 +566,12 @@ class PocketLedgerQt(QMainWindow):
         content = QWidget()
         content.setObjectName("page")
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(28, 24, 28, 28)
+        layout.setContentsMargins(22, 18, 22, 22)
+        layout.setSpacing(10)
         hero = QFrame()
         hero.setObjectName("hero")
         hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(14, 10, 14, 10)
         hero_title = QLabel(title)
         hero_title.setObjectName("heroTitle")
         hero_subtitle = QLabel(subtitle)
@@ -589,24 +591,18 @@ class PocketLedgerQt(QMainWindow):
         self.account_label = QLabel()
         self.account_label.setObjectName("cardText")
         self.account_label.setWordWrap(True)
-        model_card = self.card_frame("Money model", self.account_label)
-        layout.addWidget(model_card)
-        reset_row = QHBoxLayout()
+        reset_row = self.action_strip()
         set_cash = QPushButton("Set starting cash")
         set_cash.setObjectName("primary")
         set_cash.clicked.connect(self.set_starting_cash)
-        reset_row.addStretch()
         reset_row.addWidget(set_cash)
-        layout.addLayout(reset_row)
+        reconcile_button = QPushButton("Check actual balance")
+        reconcile_button.clicked.connect(self.reconcile_cash)
+        reset_row.addWidget(reconcile_button)
+        reset_row.addStretch()
+        layout.addWidget(reset_row)
         self.reconcile_label.setObjectName("cardText")
         self.reconcile_label.setWordWrap(True)
-        reconcile_card = self.compact_card_frame("Reconcile with bank", self.reconcile_label)
-        reconcile_layout = reconcile_card.layout()
-        reconcile_button = QPushButton("Check actual balance")
-        reconcile_button.setObjectName("primary")
-        reconcile_button.clicked.connect(self.reconcile_cash)
-        reconcile_layout.addWidget(reconcile_button, alignment=Qt.AlignRight)
-        layout.addWidget(reconcile_card)
         self.reconcile_history_table = self.table(("Date", "Expected", "Actual", "Difference", "Notes"))
         self.reconcile_history_table.setMinimumHeight(160)
         layout.addWidget(self.card_frame("Recent reconciliations", self.reconcile_history_table))
@@ -621,7 +617,6 @@ class PocketLedgerQt(QMainWindow):
         layout.addLayout(self.accounts_metric_grid)
         self.accounts_summary.setObjectName("cardText")
         self.accounts_summary.setWordWrap(True)
-        layout.addWidget(self.compact_card_frame("How to read this", self.accounts_summary))
         self.accounts_table = self.table(("Account", "Type", "Estimated balance", "Reset balance", "Reset date", "Month in", "Month out", "Purchases", "Notes"))
         self.accounts_table.setMinimumHeight(260)
         layout.addWidget(self.card_frame("Cash accounts", self.accounts_table))
@@ -636,13 +631,13 @@ class PocketLedgerQt(QMainWindow):
         layout.addLayout(self.cashflow_metric_grid)
         self.cashflow_summary.setObjectName("cardText")
         self.cashflow_summary.setWordWrap(True)
-        watch = self.compact_card_frame("What to watch", self.cashflow_summary)
-        watch_layout = watch.layout()
+        cash_actions = self.action_strip()
         cash_button = QPushButton("Set starting cash")
         cash_button.setObjectName("primary")
         cash_button.clicked.connect(self.set_starting_cash)
-        watch_layout.addWidget(cash_button, alignment=Qt.AlignRight)
-        layout.addWidget(watch)
+        cash_actions.addWidget(cash_button)
+        cash_actions.addStretch()
+        layout.addWidget(cash_actions)
         layout.addWidget(self.card_frame("Next moves", self.cashflow_visual))
         self.cashflow_table = self.table(("Date", "Type", "Name", "Amount", "Running cash"))
         layout.addWidget(self.card_frame("Detailed timeline — recent past + forecast", self.cashflow_table))
@@ -654,7 +649,6 @@ class PocketLedgerQt(QMainWindow):
         layout.addLayout(self.setup_metric_grid)
         self.setup_summary.setObjectName("cardText")
         self.setup_summary.setWordWrap(True)
-        layout.addWidget(self.card_frame("Monthly plan", self.setup_summary))
         chart_row = QHBoxLayout()
         chart_row.addWidget(self.card_frame("Bills by category", self.bill_breakdown_bars), 1)
         chart_row.addWidget(self.card_frame("Income by source", self.income_breakdown_bars), 1)
@@ -667,7 +661,6 @@ class PocketLedgerQt(QMainWindow):
         layout.addLayout(self.debt_metric_grid)
         self.debt_summary.setObjectName("cardText")
         self.debt_summary.setWordWrap(True)
-        layout.addWidget(self.card_frame("Debt plan", self.debt_summary))
         chart_row = QHBoxLayout()
         chart_row.addWidget(self.card_frame("Credit card room", self.card_debt_bars), 1)
         chart_row.addWidget(self.card_frame("Loans / mortgages", self.loan_debt_bars), 1)
@@ -678,15 +671,9 @@ class PocketLedgerQt(QMainWindow):
         page, layout = self.shell("Cash Activity", "Real checking-account activity that is not already handled by recurring bills, income, or loan schedules.")
         self.cash_activity_metric_grid.setSpacing(14)
         layout.addLayout(self.cash_activity_metric_grid)
-        guide = QFrame()
-        guide.setObjectName("card")
-        guide_layout = QVBoxLayout(guide)
-        guide_layout.setContentsMargins(18, 16, 18, 18)
-        guide_title = QLabel("Cash Activity vs Spending")
-        guide_title.setObjectName("sectionTitle")
         self.cash_activity_summary.setObjectName("cardText")
         self.cash_activity_summary.setWordWrap(True)
-        action_row = QHBoxLayout()
+        action_row = self.action_strip()
         money_in = QPushButton("+ Money in")
         money_in.setObjectName("primary")
         money_out = QPushButton("+ Money out")
@@ -705,10 +692,7 @@ class PocketLedgerQt(QMainWindow):
         action_row.addWidget(transfer)
         action_row.addWidget(card_payment)
         action_row.addStretch()
-        guide_layout.addWidget(guide_title)
-        guide_layout.addWidget(self.cash_activity_summary)
-        guide_layout.addLayout(action_row)
-        layout.addWidget(guide)
+        layout.addWidget(action_row)
         self.transactions_table = self.table(("Date", "Account", "Description", "Category", "Card paid", "Amount"))
         self.transactions_table.setMinimumHeight(420)
         layout.addWidget(self.entity_card("Checking ledger entries", self.transactions_table, self.add_transaction, self.edit_transaction, self.delete_transaction))
@@ -718,13 +702,6 @@ class PocketLedgerQt(QMainWindow):
         page, layout = self.shell("Spending", "Purchase tracking for cards and direct spending. This is for habits, limits, and insights.")
         self.spending_metric_grid.setSpacing(14)
         layout.addLayout(self.spending_metric_grid)
-        spending_help = QLabel(
-            "Use Spending for what you bought: Dutch Bros, groceries, gas, food, shopping, subscriptions, etc. "
-            "These rows feed Insights and AI analysis. They do not move checking cash by themselves unless you also enter the real checking movement on Cash Activity."
-        )
-        spending_help.setObjectName("cardText")
-        spending_help.setWordWrap(True)
-        layout.addWidget(self.compact_card_frame("What belongs here", spending_help))
         self.spending_table = self.table(("Date", "Account", "Description", "Category", "Amount", "Cashflow?"))
         layout.addWidget(self.entity_card("Purchase tracker", self.spending_table, self.add_spending, self.edit_spending, self.delete_spending))
         return page
@@ -768,12 +745,6 @@ class PocketLedgerQt(QMainWindow):
         llm_layout.setContentsMargins(18, 16, 18, 18)
         llm_title = QLabel("Local AI rundown")
         llm_title.setObjectName("sectionTitle")
-        llm_hint = QLabel(
-            "One click sends the current month, debt, and upcoming cashflow forecast to your configured local/private model "
-            "and asks for a full budget rundown."
-        )
-        llm_hint.setObjectName("cardText")
-        llm_hint.setWordWrap(True)
         self.llm_status.setObjectName("cardText")
         self.llm_status.setWordWrap(True)
         self.llm_answer.setObjectName("aiResult")
@@ -784,7 +755,6 @@ class PocketLedgerQt(QMainWindow):
         ask.setObjectName("primary")
         ask.clicked.connect(self.ask_local_llm)
         llm_layout.addWidget(llm_title)
-        llm_layout.addWidget(llm_hint)
         llm_layout.addWidget(self.llm_status)
         llm_layout.addWidget(ask, alignment=Qt.AlignRight)
         llm_layout.addWidget(self.llm_answer)
@@ -801,9 +771,6 @@ class PocketLedgerQt(QMainWindow):
         title.setObjectName("sectionTitle")
         current = QLabel(f"Current version: {APP_VERSION}")
         current.setObjectName("cardText")
-        source = QLabel(f"Updates come from: {RELEASES_PAGE_URL}")
-        source.setObjectName("cardText")
-        source.setWordWrap(True)
         self.update_status.setObjectName("cardText")
         button_row = QHBoxLayout()
         check = QPushButton("Check for updates")
@@ -816,7 +783,6 @@ class PocketLedgerQt(QMainWindow):
         button_row.addStretch()
         body.addWidget(title)
         body.addWidget(current)
-        body.addWidget(source)
         body.addWidget(self.update_status)
         body.addLayout(button_row)
         layout.addWidget(card)
@@ -826,9 +792,6 @@ class PocketLedgerQt(QMainWindow):
         export_layout.setContentsMargins(18, 16, 18, 18)
         export_title = QLabel("Exports + backups")
         export_title.setObjectName("sectionTitle")
-        export_help = QLabel("Export readable CSV/JSON copies or make a raw database backup before big changes.")
-        export_help.setObjectName("cardText")
-        export_help.setWordWrap(True)
         self.export_status.setObjectName("cardText")
         export_buttons = QHBoxLayout()
         export_csv = QPushButton("Export ledger CSVs")
@@ -845,7 +808,6 @@ class PocketLedgerQt(QMainWindow):
         export_buttons.addWidget(backup)
         export_buttons.addStretch()
         export_layout.addWidget(export_title)
-        export_layout.addWidget(export_help)
         export_layout.addWidget(self.export_status)
         export_layout.addLayout(export_buttons)
         layout.addWidget(export_card)
@@ -855,13 +817,6 @@ class PocketLedgerQt(QMainWindow):
         llm_settings_layout.setContentsMargins(18, 16, 18, 18)
         llm_settings_title = QLabel("Local LLM")
         llm_settings_title.setObjectName("sectionTitle")
-        llm_settings_text = QLabel(
-            "Insights can ask a local model for spending notes. Use Ollama /api/generate or LM Studio/OpenAI-compatible /v1/chat/completions. "
-            "Private LAN addresses like http://10.0.0.156:1234 are allowed and will auto-fill the chat endpoint. "
-            "If your server returns 401, add its API key here."
-        )
-        llm_settings_text.setObjectName("cardText")
-        llm_settings_text.setWordWrap(True)
         llm_button_row = QHBoxLayout()
         configure_llm = QPushButton("Configure local LLM")
         configure_llm.setObjectName("primary")
@@ -869,13 +824,8 @@ class PocketLedgerQt(QMainWindow):
         llm_button_row.addWidget(configure_llm)
         llm_button_row.addStretch()
         llm_settings_layout.addWidget(llm_settings_title)
-        llm_settings_layout.addWidget(llm_settings_text)
         llm_settings_layout.addLayout(llm_button_row)
         layout.addWidget(llm_settings)
-        setup_note = QLabel("Configure the recurring structure here. The main tabs use this data for dashboards, cashflow, and insights.")
-        setup_note.setObjectName("cardText")
-        setup_note.setWordWrap(True)
-        layout.addWidget(self.card_frame("Setup data", setup_note))
         self.cash_accounts_table = self.table(("Name", "Type", "Starting", "Start date", "Notes"))
         self.cash_accounts_table.setMinimumHeight(220)
         layout.addWidget(self.entity_card("Cash accounts", self.cash_accounts_table, self.add_cash_account, self.edit_cash_account, self.delete_cash_account))
@@ -943,6 +893,16 @@ class PocketLedgerQt(QMainWindow):
         header.addWidget(add_btn)
         layout.addLayout(header)
         layout.addWidget(table)
+        return frame
+
+    def action_strip(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("actionStrip")
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(8)
+        frame.addWidget = layout.addWidget
+        frame.addStretch = layout.addStretch
         return frame
 
     def table(self, headers: tuple[str, ...]) -> QTableWidget:
@@ -2643,6 +2603,9 @@ QPushButton#nav:hover, QPushButton#nav[active="true"] {
 #heroSubtitle { color: #475569; font: 10pt 'Segoe UI'; }
 #card {
     background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px;
+}
+#actionStrip {
+    background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px;
 }
 #sectionTitle { color: #0f172a; font: 700 13pt 'Segoe UI'; }
 #monthPill {
