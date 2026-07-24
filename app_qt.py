@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.32"
+APP_VERSION = "0.2.33"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -73,6 +73,9 @@ PAID_ELSEWHERE = "Credit card / elsewhere"
 PAYMENT_METHODS = (BANK_ACH, BANK_MANUAL, PAID_ELSEWHERE)
 CATEGORIES = ("Fixed", "Utilities", "Other")
 EXTRA_INCOME_CATEGORY = "Extra Income"
+TRANSFER_IN_CATEGORY = "Transfer In"
+TRANSFER_OUT_CATEGORY = "Transfer Out"
+CASHFLOW_NEUTRAL_CATEGORIES = {TRANSFER_IN_CATEGORY, TRANSFER_OUT_CATEGORY}
 SPENDING_CATEGORIES = (
     "Groceries",
     "Dining",
@@ -83,6 +86,8 @@ SPENDING_CATEGORIES = (
     "Bills",
     "Credit Card Payment",
     EXTRA_INCOME_CATEGORY,
+    TRANSFER_IN_CATEGORY,
+    TRANSFER_OUT_CATEGORY,
     "Other",
 )
 
@@ -645,15 +650,19 @@ class PocketLedgerQt(QMainWindow):
         money_in = QPushButton("+ Money in")
         money_in.setObjectName("primary")
         money_out = QPushButton("+ Money out")
+        transfer = QPushButton("+ Transfer")
         card_payment = QPushButton("+ Card payment")
         money_in.setToolTip("Use for one-off income like eBay, cash jobs, refunds, or rent that was not configured as recurring income.")
         money_out.setToolTip("Use for checking spending or cash withdrawals that are not recurring bills.")
+        transfer.setToolTip("Move money between cash accounts without counting the move as spending.")
         card_payment.setToolTip("Use when checking paid a credit card so the cashflow shows the money leaving once.")
         money_in.clicked.connect(self.add_extra_income)
         money_out.clicked.connect(self.add_money_out)
+        transfer.clicked.connect(self.add_transfer)
         card_payment.clicked.connect(self.add_card_payment)
         action_row.addWidget(money_in)
         action_row.addWidget(money_out)
+        action_row.addWidget(transfer)
         action_row.addWidget(card_payment)
         action_row.addStretch()
         guide_layout.addWidget(guide_title)
@@ -1043,7 +1052,7 @@ class PocketLedgerQt(QMainWindow):
         cash_transactions = self.transactions_for_account(transactions, cash["id"])
         cash_spending = self.spending_for_account(spending, cash["id"])
         actual_spending = self.transaction_total_between(cash_transactions, change_start, today) + self.cash_spending_total_between(cash_spending, change_start, today)
-        extra_income = sum(row["amount"] for row in cash_transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
+        extra_income = sum(row["amount"] for row in cash_transactions if row["category"] in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY) and change_start <= self.parse_date(row["trans_date"]) <= today)
         cash_today = float(cash["starting_balance"] or 0) + income_received + extra_income - due_outflow - actual_spending
         card_balances = {card["id"]: float(card["balance"] or 0) for card in cards}
         card_debt = sum(card_balances.values())
@@ -1180,9 +1189,10 @@ class PocketLedgerQt(QMainWindow):
     def refresh_cash_activity_summary(self, transactions) -> None:
         start = date.today().replace(day=1)
         month_rows = [row for row in transactions if start <= self.parse_date(row["trans_date"]) <= date.today()]
-        money_in = sum(float(row["amount"] or 0) for row in month_rows if row["category"] == EXTRA_INCOME_CATEGORY)
+        money_in = sum(float(row["amount"] or 0) for row in month_rows if row["category"] in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY))
         card_payments = sum(float(row["amount"] or 0) for row in month_rows if row["category"] == "Credit Card Payment")
-        money_out = sum(float(row["amount"] or 0) for row in month_rows if row["category"] not in (EXTRA_INCOME_CATEGORY, "Credit Card Payment"))
+        transfers = sum(float(row["amount"] or 0) for row in month_rows if row["category"] in CASHFLOW_NEUTRAL_CATEGORIES)
+        money_out = sum(float(row["amount"] or 0) for row in month_rows if row["category"] not in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY, "Credit Card Payment"))
         for i in reversed(range(self.cash_activity_metric_grid.count())):
             widget = self.cash_activity_metric_grid.itemAt(i).widget()
             if widget:
@@ -1190,15 +1200,16 @@ class PocketLedgerQt(QMainWindow):
         metrics = (
             Metric("Money in", money(money_in), "One-off deposits like eBay, cash jobs, refunds, or non-recurring rental income.", "teal"),
             Metric("Money out", money(money_out), "Checking spending/cash pulls that should reduce cashflow.", "slate"),
+            Metric("Transfers", money(transfers), "Money moved between your own cash accounts; not counted as spending.", "blue"),
             Metric("Card payments", money(card_payments), "Checking payments to credit cards. Use this so bills paid by card are not double-counted.", "blue"),
             Metric("Rows this month", str(len(month_rows)), "Manual checking entries counted this month.", "slate"),
         )
         for idx, metric in enumerate(metrics):
-            self.cash_activity_metric_grid.addWidget(MetricCard(metric), 0, idx)
+            self.cash_activity_metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
         self.cash_activity_summary.setText(
-            "Cash Activity is for real checking movement: money landed, cash withdrawn, checking spending, or a card payment leaving checking. "
+            "Cash Activity is for real account movement: money landed, transfers between your cash accounts, cash withdrawn, checking spending, or a card payment leaving checking. "
             "Spending is for what you bought and where money went: coffee, food, groceries, gas, shopping, etc. "
-            "Example: buying Dutch Bros on a credit card goes on Spending; paying that credit card from checking goes on Cash Activity."
+            "Example: move $100 to spending checking with Transfer, then enter Dutch Bros/gas/food on Spending against the spending account."
         )
 
     def refresh_reconciliation_summary(self, cash_today: float, reconciliations) -> None:
@@ -1397,7 +1408,7 @@ class PocketLedgerQt(QMainWindow):
         records = []
         for row in transactions:
             d = self.parse_date(row["trans_date"])
-            if start <= d <= end and row["category"] != EXTRA_INCOME_CATEGORY:
+            if start <= d <= end and row["category"] not in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY, TRANSFER_OUT_CATEGORY):
                 records.append({"category": row["category"], "description": row["description"], "source": "Checking", "amount": float(row["amount"] or 0)})
         for row in spending:
             d = self.parse_date(row["spend_date"])
@@ -1534,7 +1545,7 @@ class PocketLedgerQt(QMainWindow):
         for row in transactions:
             d = self.parse_date(row["trans_date"])
             if start <= d <= end:
-                if row["category"] != EXTRA_INCOME_CATEGORY:
+                if row["category"] not in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY):
                     total += float(row["amount"] or 0)
         return total
 
@@ -1566,7 +1577,7 @@ class PocketLedgerQt(QMainWindow):
             account_spending = self.spending_for_account(spending, account["id"])
             activity_total = self.transaction_total_between(account_transactions, change_start, today)
             cash_spend_total = self.cash_spending_total_between(account_spending, change_start, today)
-            extra_income = sum(row["amount"] for row in account_transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
+            extra_income = sum(row["amount"] for row in account_transactions if row["category"] in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY) and change_start <= self.parse_date(row["trans_date"]) <= today)
             balance = float(account["starting_balance"] or 0) + extra_income - activity_total - cash_spend_total
             if int(account["id"]) == int(primary["id"]):
                 income_received = self.scheduled_income_between(income, change_start, today)
@@ -1593,8 +1604,9 @@ class PocketLedgerQt(QMainWindow):
         for row in transactions:
             d = self.parse_date(row["trans_date"])
             if start <= d <= end:
-                amount = float(row["amount"] or 0) if row["category"] == EXTRA_INCOME_CATEGORY else -float(row["amount"] or 0)
-                events.append((d, "Extra income" if amount > 0 else "Spending", row["description"], amount))
+                amount = float(row["amount"] or 0) if row["category"] in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY) else -float(row["amount"] or 0)
+                kind = "Transfer in" if row["category"] == TRANSFER_IN_CATEGORY else "Transfer out" if row["category"] == TRANSFER_OUT_CATEGORY else "Extra income" if amount > 0 else "Spending"
+                events.append((d, kind, row["description"], amount))
         for row in spending:
             d = self.parse_date(row["spend_date"])
             if start <= d <= end:
@@ -1690,7 +1702,7 @@ class PocketLedgerQt(QMainWindow):
         income_received = self.scheduled_income_between(income, change_start, today)
         due_outflow = self.scheduled_checking_outflow_between(bills, cards, loans, change_start, today)
         actual_spending = self.transaction_total_between(cash_transactions, change_start, today) + self.cash_spending_total_between(cash_spending, change_start, today)
-        extra_income = sum(row["amount"] for row in cash_transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
+        extra_income = sum(row["amount"] for row in cash_transactions if row["category"] in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY) and change_start <= self.parse_date(row["trans_date"]) <= today)
         cash_today = float(cash["starting_balance"] or 0) + income_received + extra_income - due_outflow - actual_spending
         timeline = self.upcoming_events(bills, income, cards, loans, cash_transactions, cash_spending, cash_today, today, today + timedelta(days=90))
         rows = [{"date": row["date"], "type": row["kind"], "name": row["name"], "amount": row["amount"], "running_cash": row["running"]} for row in timeline]
@@ -1883,7 +1895,7 @@ class PocketLedgerQt(QMainWindow):
         income_received = self.scheduled_income_between(income, change_start, today)
         due_outflow = self.scheduled_checking_outflow_between(bills, cards, loans, change_start, today)
         actual_spending = self.transaction_total_between(cash_transactions, change_start, today) + self.cash_spending_total_between(cash_spending, change_start, today)
-        extra_income = sum(row["amount"] for row in cash_transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
+        extra_income = sum(row["amount"] for row in cash_transactions if row["category"] in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY) and change_start <= self.parse_date(row["trans_date"]) <= today)
         cash_today = float(cash["starting_balance"] or 0) + income_received + extra_income - due_outflow - actual_spending
         timeline = self.upcoming_events(bills, income, cards, loans, cash_transactions, cash_spending, cash_today, today + timedelta(days=1), today + timedelta(days=60))
         room = self.spending_room_periods(bills, income, cards, loans, cash_today, today)
@@ -2173,7 +2185,7 @@ class PocketLedgerQt(QMainWindow):
         income_received = self.scheduled_income_between(income, change_start, today)
         due_outflow = self.scheduled_checking_outflow_between(bills, cards, loans, change_start, today)
         actual_spending = self.transaction_total_between(cash_transactions, change_start, today) + self.cash_spending_total_between(cash_spending, change_start, today)
-        extra_income = sum(row["amount"] for row in cash_transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
+        extra_income = sum(row["amount"] for row in cash_transactions if row["category"] in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY) and change_start <= self.parse_date(row["trans_date"]) <= today)
         return float(cash["starting_balance"] or 0) + income_received + extra_income - due_outflow - actual_spending
 
     def reconcile_cash(self) -> None:
@@ -2314,6 +2326,47 @@ class PocketLedgerQt(QMainWindow):
     def add_extra_income(self): self.transaction_dialog({"trans_date": date.today().isoformat(), "category": EXTRA_INCOME_CATEGORY, "description": "Extra income"})
     def add_money_out(self): self.transaction_dialog({"trans_date": date.today().isoformat(), "category": "Other", "description": "Checking spending"})
     def add_card_payment(self): self.transaction_dialog({"trans_date": date.today().isoformat(), "category": "Credit Card Payment", "description": "Credit card payment"})
+    def add_transfer(self):
+        if not self.require_single_ledger():
+            return
+        account_choices = self.cash_account_choices()
+        if len(account_choices) < 2:
+            QMessageBox.information(self, "Add another account", "Add at least two cash accounts before entering a transfer.")
+            return
+        values = self.simple_dialog(
+            "Transfer between accounts",
+            [("trans_date","date",()),("From account","choice",account_choices),("To account","choice",account_choices),("amount","money",()),("description","text",())],
+            {
+                "trans_date": date.today().isoformat(),
+                "From account": account_choices[0],
+                "To account": account_choices[1],
+                "amount": 0,
+                "description": "Transfer",
+            },
+        )
+        if not values:
+            return
+        from_id = int(values["From account"].split(" - ", 1)[0])
+        to_id = int(values["To account"].split(" - ", 1)[0])
+        if from_id == to_id:
+            QMessageBox.information(self, "Choose two accounts", "A transfer needs two different cash accounts.")
+            return
+        amount = float(values["amount"] or 0)
+        if amount <= 0:
+            QMessageBox.information(self, "Enter an amount", "Transfer amount must be greater than $0.")
+            return
+        description = values["description"] or "Transfer"
+        from_name = values["From account"].split(" - ", 1)[1]
+        to_name = values["To account"].split(" - ", 1)[1]
+        self.store.execute(
+            "INSERT INTO transactions(trans_date,description,amount,category,related_card_id,source,account_id,ledger_id) VALUES(?,?,?,?,?,?,?,?)",
+            (values["trans_date"], f"{description} to {to_name}", amount, TRANSFER_OUT_CATEGORY, None, "Transfer", from_id, self.ledger_id),
+        )
+        self.store.execute(
+            "INSERT INTO transactions(trans_date,description,amount,category,related_card_id,source,account_id,ledger_id) VALUES(?,?,?,?,?,?,?,?)",
+            (values["trans_date"], f"{description} from {from_name}", amount, TRANSFER_IN_CATEGORY, None, "Transfer", to_id, self.ledger_id),
+        )
+        self.refresh_all()
     def edit_transaction(self):
         row_id = self.selected_id(self.transactions_table)
         if row_id: self.transaction_dialog(self.store.one("SELECT * FROM transactions WHERE id=? AND ledger_id=?", (row_id, self.ledger_id)))
