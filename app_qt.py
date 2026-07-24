@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.45"
+APP_VERSION = "0.2.46"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -563,12 +563,14 @@ class PocketLedgerQt(QMainWindow):
         self.debt_metric_grid = QGridLayout()
         self.debt_summary = QLabel()
         self.card_debt_bars = BarsWidget()
+        self.card_forecast_bars = BarsWidget()
         self.loan_debt_bars = BarsWidget()
         self.update_status = QLabel("Not checked yet.")
         self.export_status = QLabel("No export run yet.")
         self.current_ledger_label = QLabel()
         self.overview_account_bars = BarsWidget()
         self.overview_obligation_bars = BarsWidget()
+        self.overview_budget_bars = BarsWidget()
         self.overview_timeline = TimelineWidget()
         self.overview_watch_label = QLabel()
         self._build()
@@ -701,6 +703,8 @@ class PocketLedgerQt(QMainWindow):
         self.overview_bills_table = self.table(("Date", "Type", "Name", "Amount", "Running cash"))
         self.overview_bills_table.setMinimumHeight(240)
         layout.addWidget(self.card_frame("Upcoming bills and deposits", self.overview_bills_table))
+        self.overview_budget_bars.setMinimumHeight(300)
+        layout.addWidget(self.card_frame("Category budget health", self.overview_budget_bars))
         self.account_label = QLabel()
         self.account_label.setObjectName("cardText")
         self.account_label.setWordWrap(True)
@@ -768,6 +772,8 @@ class PocketLedgerQt(QMainWindow):
         chart_row.addWidget(self.card_frame("Credit card room", self.card_debt_bars), 1)
         chart_row.addWidget(self.card_frame("Loans / mortgages", self.loan_debt_bars), 1)
         layout.addLayout(chart_row)
+        self.card_forecast_bars.setMinimumHeight(320)
+        layout.addWidget(self.card_frame("Credit card forecast", self.card_forecast_bars))
         return page
 
     def cash_activity_page(self) -> QWidget:
@@ -1296,7 +1302,7 @@ class PocketLedgerQt(QMainWindow):
         self.set_table(self.cash_accounts_table, cash_accounts, lambda r: (r["name"], r["account_type"], money(r["starting_balance"]), r["start_date"], r["notes"] or ""))
         self.set_table(self.budget_targets_table, budget_targets, lambda r: (r["category"], money(r["monthly_limit"]), r["notes"] or ""))
         self.refresh_accounts(cash_accounts, bills, income, cards, loans, transactions, spending, today)
-        self.refresh_debt_summary(cards, loans)
+        self.refresh_debt_summary(cards, loans, bills, spending, today)
         self.set_table(self.transactions_table, transactions, lambda r: (r["trans_date"], r["account_name"], r["description"], r["category"], r["related_card_name"] or "—", money(r["amount"])))
         self.set_table(self.spending_table, spending, lambda r: (r["spend_date"], f"{r['account_kind']}: {r['account_name']}", r["description"], r["category"], money(r["amount"]), "No"))
         self.refresh_reimbursements(reimbursements)
@@ -1315,7 +1321,7 @@ class PocketLedgerQt(QMainWindow):
         self.set_table(self.cashflow_table, detailed_timeline, lambda r: (r["date"], r["kind"], r["name"], signed_money(r["amount"]), money(r["running"]) if r["running"] is not None else "— before reset"))
         self.cashflow_table.sortItems(0, Qt.AscendingOrder)
         self.color_cashflow_table()
-        self.refresh_overview(cash_accounts, bills, income, cards, loans, transactions, spending, cash_today, future_timeline, today)
+        self.refresh_overview(cash_accounts, bills, income, cards, loans, transactions, spending, budget_targets, cash_today, future_timeline, today)
         self.refresh_cashflow_summary(future_timeline, cash_today)
         self.refresh_spending_summary(spending)
         monthly_allowance = self.monthly_variable_spending(bills, income, cards, loans, spending, today)
@@ -1339,7 +1345,34 @@ class PocketLedgerQt(QMainWindow):
                     item.setBackground(background)
                     item.setForeground(QColor("#0f172a"))
 
-    def refresh_overview(self, cash_accounts, bills, income, cards, loans, transactions, spending, cash_today: float, future_timeline: list[dict], today: date) -> None:
+    def budget_health_rows(self, budget_targets, spending, today: date) -> list[tuple]:
+        start = today.replace(day=1)
+        month_days = calendar.monthrange(today.year, today.month)[1]
+        elapsed_days = max(1, today.day)
+        spent_by_category: dict[str, float] = {}
+        for row in spending:
+            d = self.parse_date(row["spend_date"])
+            if start <= d <= today:
+                spent_by_category[row["category"]] = spent_by_category.get(row["category"], 0) + float(row["amount"] or 0)
+        rows = []
+        for target in budget_targets:
+            limit = float(target["monthly_limit"] or 0)
+            if limit <= 0:
+                continue
+            spent = float(spent_by_category.get(target["category"], 0))
+            projected = spent / elapsed_days * month_days
+            remaining = limit - spent
+            color = "#ef4444" if spent > limit else "#f59e0b" if projected > limit else "#0f766e"
+            rows.append((
+                target["category"],
+                spent,
+                color,
+                [("Monthly target", limit), ("Remaining", remaining), ("Projected", projected)],
+                limit,
+            ))
+        return sorted(rows, key=lambda row: (row[1] - row[4]), reverse=True)
+
+    def refresh_overview(self, cash_accounts, bills, income, cards, loans, transactions, spending, budget_targets, cash_today: float, future_timeline: list[dict], today: date) -> None:
         palette = ["#2563eb", "#0f766e", "#8b5cf6", "#f59e0b", "#06b6d4", "#ef4444", "#22c55e"]
         account_balances = self.cash_account_balances(cash_accounts, bills, income, cards, loans, transactions, spending, today)
         account_max = max([abs(value) for _name, value in account_balances] + [1])
@@ -1365,6 +1398,7 @@ class PocketLedgerQt(QMainWindow):
             ("Debt payments", card_minimums + loan_payments, "#8b5cf6", [("Card minimums", card_minimums), ("Loan / mortgage payments", loan_payments)], pressure_max),
             ("Tracked spending", month_spending, "#f59e0b", [("Spending page purchases this month", month_spending)], pressure_max),
         ])
+        self.overview_budget_bars.set_rows(self.budget_health_rows(budget_targets, spending, today)[:8])
 
         preview_events = [row for row in future_timeline if row["kind"] != "Today"][:8]
         self.overview_timeline.set_events(preview_events)
@@ -1643,7 +1677,7 @@ class PocketLedgerQt(QMainWindow):
                 lambda r: (r["check_date"], money(r["expected_balance"]), money(r["actual_balance"]), signed_money(r["difference"]), r["notes"] or ""),
             )
 
-    def refresh_debt_summary(self, cards, loans) -> None:
+    def refresh_debt_summary(self, cards, loans, bills, spending, today: date) -> None:
         card_balance = sum(float(row["balance"] or 0) for row in cards)
         card_limit = sum(float(row["credit_limit"] or 0) for row in cards)
         card_room = card_limit - card_balance
@@ -1668,7 +1702,7 @@ class PocketLedgerQt(QMainWindow):
         self.debt_summary.setText(
             "Debt is the source of truth for current credit card balances, card minimums, and loan/mortgage payments. "
             "Loan balance means current remaining balance; original amount and extra paid are separate reference fields. "
-            "Card purchases on the Spending page are for tracking and insights; they do not change current card balance here."
+            "Card purchases on the Spending page are for tracking and insights; the forecast below shows known card pressure that may need to be covered on top of the balance you entered."
         )
         palette = ["#2563eb", "#0f766e", "#8b5cf6", "#f59e0b", "#06b6d4", "#ef4444", "#22c55e"]
         card_rows = []
@@ -1696,6 +1730,46 @@ class PocketLedgerQt(QMainWindow):
             ))
         self.card_debt_bars.set_rows(sorted(card_rows, key=lambda row: row[1], reverse=True))
         self.loan_debt_bars.set_rows(sorted(loan_rows, key=lambda row: row[1], reverse=True))
+        self.card_forecast_bars.set_rows(self.card_forecast_rows(cards, bills, spending, today))
+
+    def card_forecast_rows(self, cards, bills, spending, today: date) -> list[tuple]:
+        start = today.replace(day=1)
+        end = date(today.year, today.month, calendar.monthrange(today.year, today.month)[1])
+        rows = []
+        for idx, card in enumerate(cards):
+            card_id = int(card["id"])
+            balance = float(card["balance"] or 0)
+            limit = float(card["credit_limit"] or 0)
+            tracked_spending = sum(
+                float(row["amount"] or 0)
+                for row in spending
+                if row["card_id"] and int(row["card_id"]) == card_id and start <= self.parse_date(row["spend_date"]) <= today
+            )
+            card_paid_bills = sum(
+                float(row["amount"] or 0)
+                for row in bills
+                if not is_bank_paid(row["paid_from"])
+                and row["related_card_id"]
+                and int(row["related_card_id"]) == card_id
+                for _d in self.dates_between(row["due_day"], today, end)
+            )
+            known_pressure = tracked_spending + card_paid_bills
+            forecast_balance = balance + known_pressure
+            room_after = limit - forecast_balance
+            color = "#ef4444" if room_after < 0 else "#f59e0b" if limit and room_after < limit * 0.1 else "#0f766e"
+            rows.append((
+                card["name"],
+                max(0.0, forecast_balance),
+                color,
+                [
+                    ("Current balance entered", balance),
+                    ("Tracked card spending this month", tracked_spending),
+                    ("Upcoming card-paid bills this month", card_paid_bills),
+                    ("Forecast room after known pressure", room_after),
+                ],
+                max(limit, forecast_balance, 1),
+            ))
+        return sorted(rows, key=lambda row: row[1], reverse=True)
 
     def refresh_setup_summary(self, bills, income, cards, loans, today: date) -> None:
         start = today.replace(day=1)
@@ -1891,6 +1965,11 @@ class PocketLedgerQt(QMainWindow):
         month_days = calendar.monthrange(start.year, start.month)[1]
         today = date.today()
         elapsed_days = max(1, min(today.day, month_days)) if today.year == start.year and today.month == start.month else month_days
+        spending_by_category: dict[str, float] = {}
+        for row in spending:
+            d = self.parse_date(row["spend_date"])
+            if start <= d <= end:
+                spending_by_category[row["category"]] = spending_by_category.get(row["category"], 0) + float(row["amount"] or 0)
         budget_rows = []
         over_count = 0
         projected_over_count = 0
@@ -1898,7 +1977,7 @@ class PocketLedgerQt(QMainWindow):
             limit = float(target["monthly_limit"] or 0)
             if limit <= 0:
                 continue
-            spent = float(by_category.get(target["category"], 0))
+            spent = float(spending_by_category.get(target["category"], 0))
             projected = spent / elapsed_days * month_days
             remaining = limit - spent
             if spent > limit:
@@ -2469,6 +2548,17 @@ class PocketLedgerQt(QMainWindow):
                 "upcoming_events": timeline[:35],
                 "monthly_variable_spending": monthly_allowance,
             },
+            "credit_card_forecast": [
+                {
+                    "card": row[0],
+                    "forecast_balance": row[1],
+                    "current_balance": row[3][0][1],
+                    "tracked_spending_this_month": row[3][1][1],
+                    "upcoming_card_paid_bills_this_month": row[3][2][1],
+                    "forecast_room_after_known_pressure": row[3][3][1],
+                }
+                for row in self.card_forecast_rows(cards, bills, spending, today)
+            ],
             "spending_by_category": dict(sorted(by_category.items(), key=lambda item: item[1], reverse=True)),
             "budget_targets": [
                 {
@@ -2479,6 +2569,16 @@ class PocketLedgerQt(QMainWindow):
                     "projected_at_current_pace": float(by_category.get(row["category"], 0)) / elapsed_days * month_days,
                 }
                 for row in budget_targets
+            ],
+            "variable_budget_health": [
+                {
+                    "category": row[0],
+                    "spent": row[1],
+                    "monthly_target": row[3][0][1],
+                    "remaining": row[3][1][1],
+                    "projected": row[3][2][1],
+                }
+                for row in self.budget_health_rows(budget_targets, spending, today)
             ],
             "spending_by_account": dict(sorted(by_account.items(), key=lambda item: item[1], reverse=True)),
             "spending_by_description": dict(sorted(by_description.items(), key=lambda item: item[1], reverse=True)[:30]),
