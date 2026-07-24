@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.35"
+APP_VERSION = "0.2.36"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -471,6 +471,8 @@ class PocketLedgerQt(QMainWindow):
         self.cashflow_metric_grid = QGridLayout()
         self.cashflow_visual = TimelineWidget()
         self.cashflow_summary = QLabel()
+        self.accounts_metric_grid = QGridLayout()
+        self.accounts_summary = QLabel()
         self.spending_metric_grid = QGridLayout()
         self.cash_activity_metric_grid = QGridLayout()
         self.cash_activity_summary = QLabel()
@@ -501,6 +503,7 @@ class PocketLedgerQt(QMainWindow):
         self.setCentralWidget(root)
         self.setStyleSheet(STYLE)
         self.add_page("Overview", self.overview_page())
+        self.add_page("Accounts", self.accounts_page())
         self.add_page("Cashflow", self.cashflow_page())
         self.add_page("Bills + Income", self.setup_page())
         self.add_page("Debt", self.debt_page())
@@ -529,7 +532,7 @@ class PocketLedgerQt(QMainWindow):
         self.ledger_combo.setObjectName("ledgerCombo")
         layout.addWidget(self.ledger_combo)
         layout.addSpacing(18)
-        for name in ("Overview", "Cashflow", "Bills + Income", "Debt", "Cash Activity", "Spending", "Insights", "Settings"):
+        for name in ("Overview", "Accounts", "Cashflow", "Bills + Income", "Debt", "Cash Activity", "Spending", "Insights", "Settings"):
             button = QPushButton(name)
             button.setObjectName("nav")
             button.clicked.connect(lambda _checked=False, n=name: self.go(n))
@@ -610,6 +613,21 @@ class PocketLedgerQt(QMainWindow):
         self.room_table = self.table(("Period", "Starting", "Income", "Due/planned", "After bills", "Safe", "Per day"))
         layout.addWidget(self.card_frame("Spending room", self.room_table))
         layout.addStretch()
+        return page
+
+    def accounts_page(self) -> QWidget:
+        page, layout = self.shell("Accounts", "Balances and recent movement for each checking, spending, and savings account.")
+        self.accounts_metric_grid.setSpacing(14)
+        layout.addLayout(self.accounts_metric_grid)
+        self.accounts_summary.setObjectName("cardText")
+        self.accounts_summary.setWordWrap(True)
+        layout.addWidget(self.compact_card_frame("How to read this", self.accounts_summary))
+        self.accounts_table = self.table(("Account", "Type", "Estimated balance", "Reset balance", "Reset date", "Month in", "Month out", "Purchases", "Notes"))
+        self.accounts_table.setMinimumHeight(260)
+        layout.addWidget(self.card_frame("Cash accounts", self.accounts_table))
+        self.account_activity_table = self.table(("Date", "Account", "Kind", "Description", "Category", "Amount"))
+        self.account_activity_table.setMinimumHeight(360)
+        layout.addWidget(self.card_frame("Recent account activity", self.account_activity_table))
         return page
 
     def cashflow_page(self) -> QWidget:
@@ -1113,6 +1131,7 @@ class PocketLedgerQt(QMainWindow):
         self.set_table(self.loans_table, loans, lambda r: (r["name"], r["lender"], money(self.loan_remaining(r)), money(self.loan_original_amount(r)), money(r["extra_payment"]), f"{r['apr']:.2f}%", money(r["payment"]), r["due_day"] or "—"))
         self.set_table(self.cash_accounts_table, cash_accounts, lambda r: (r["name"], r["account_type"], money(r["starting_balance"]), r["start_date"], r["notes"] or ""))
         self.set_table(self.budget_targets_table, budget_targets, lambda r: (r["category"], money(r["monthly_limit"]), r["notes"] or ""))
+        self.refresh_accounts(cash_accounts, bills, income, cards, loans, transactions, spending, today)
         self.refresh_debt_summary(cards, loans)
         self.set_table(self.transactions_table, transactions, lambda r: (r["trans_date"], r["account_name"], r["description"], r["category"], r["related_card_name"] or "—", money(r["amount"])))
         self.set_table(self.spending_table, spending, lambda r: (r["spend_date"], f"{r['account_kind']}: {r['account_name']}", r["description"], r["category"], money(r["amount"]), "No"))
@@ -1232,6 +1251,105 @@ class PocketLedgerQt(QMainWindow):
             "Cash Activity is for real account movement: money landed, transfers between your cash accounts, cash withdrawn, checking spending, or a card payment leaving checking. "
             "Spending is for what you bought and where money went: coffee, food, groceries, gas, shopping, etc. "
             "Example: move $100 to spending checking with Transfer, then enter Dutch Bros/gas/food on Spending against the spending account."
+        )
+
+    def refresh_accounts(self, cash_accounts, bills, income, cards, loans, transactions, spending, today: date) -> None:
+        month_start = today.replace(day=1)
+        primary = self.cash_account()
+        account_rows = []
+        activity_rows = []
+        total_balance = 0.0
+        spending_balance = 0.0
+        savings_balance = 0.0
+        for account in cash_accounts:
+            start_date = self.parse_date(account["start_date"])
+            change_start = start_date + timedelta(days=1)
+            account_transactions = self.transactions_for_account(transactions, account["id"])
+            account_spending = self.spending_for_account(spending, account["id"])
+            activity_out = self.transaction_total_between(account_transactions, change_start, today)
+            purchase_out = self.cash_spending_total_between(account_spending, change_start, today)
+            money_in_total = sum(float(row["amount"] or 0) for row in account_transactions if row["category"] in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY) and change_start <= self.parse_date(row["trans_date"]) <= today)
+            scheduled_in = self.scheduled_income_between(income, change_start, today) if int(account["id"]) == int(primary["id"]) else 0.0
+            scheduled_out = self.scheduled_checking_outflow_between(bills, cards, loans, change_start, today) if int(account["id"]) == int(primary["id"]) else 0.0
+            balance = float(account["starting_balance"] or 0) + scheduled_in + money_in_total - scheduled_out - activity_out - purchase_out
+
+            month_transactions = [row for row in account_transactions if month_start <= self.parse_date(row["trans_date"]) <= today]
+            month_spending = [row for row in account_spending if month_start <= self.parse_date(row["spend_date"]) <= today]
+            month_in = sum(float(row["amount"] or 0) for row in month_transactions if row["category"] in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY))
+            if int(account["id"]) == int(primary["id"]):
+                month_in += self.scheduled_income_between(income, month_start, today)
+            month_out = sum(float(row["amount"] or 0) for row in month_transactions if row["category"] not in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY))
+            if int(account["id"]) == int(primary["id"]):
+                month_out += self.scheduled_checking_outflow_between(bills, cards, loans, month_start, today)
+            purchases = sum(float(row["amount"] or 0) for row in month_spending)
+
+            total_balance += balance
+            if account["account_type"] == "Spending checking":
+                spending_balance += balance
+            if account["account_type"] == "Savings":
+                savings_balance += balance
+            account_rows.append({
+                "id": account["id"],
+                "name": account["name"],
+                "type": account["account_type"],
+                "balance": balance,
+                "starting": float(account["starting_balance"] or 0),
+                "start_date": account["start_date"],
+                "month_in": month_in,
+                "month_out": month_out,
+                "purchases": purchases,
+                "notes": account["notes"] or "",
+            })
+
+            for row in account_transactions:
+                signed_amount = float(row["amount"] or 0) if row["category"] in (EXTRA_INCOME_CATEGORY, TRANSFER_IN_CATEGORY) else -float(row["amount"] or 0)
+                activity_rows.append({
+                    "id": f"t{row['id']}",
+                    "date": row["trans_date"],
+                    "account": account["name"],
+                    "kind": "Cash activity",
+                    "description": row["description"],
+                    "category": row["category"],
+                    "amount": signed_money(signed_amount),
+                })
+            for row in account_spending:
+                activity_rows.append({
+                    "id": f"s{row['id']}",
+                    "date": row["spend_date"],
+                    "account": account["name"],
+                    "kind": "Purchase",
+                    "description": row["description"],
+                    "category": row["category"],
+                    "amount": signed_money(-float(row["amount"] or 0)),
+                })
+
+        for i in reversed(range(self.accounts_metric_grid.count())):
+            widget = self.accounts_metric_grid.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+        metrics = (
+            Metric("Total cash accounts", money(total_balance), "Estimated across checking, spending checking, savings, and other cash accounts.", "teal"),
+            Metric("Spending checking", money(spending_balance), "Estimated money available in accounts marked Spending checking.", "blue"),
+            Metric("Savings", money(savings_balance), "Estimated money held in savings accounts.", "teal"),
+            Metric("Accounts tracked", str(len(account_rows)), "Cash accounts in this ledger.", "slate"),
+        )
+        for idx, metric in enumerate(metrics):
+            self.accounts_metric_grid.addWidget(MetricCard(metric), idx // 4, idx % 4)
+        self.accounts_summary.setText(
+            "Bills checking is the account Cashflow forecasts with scheduled income, bills, card minimums, and loan payments. "
+            "Spending checking and savings are tracked from their reset balance plus transfers, manual activity, and purchases assigned to that account. "
+            "Use Cash Activity > Transfer to move money between your own accounts, then use Spending for what you actually bought."
+        )
+        self.set_table(
+            self.accounts_table,
+            account_rows,
+            lambda r: (r["name"], r["type"], money(r["balance"]), money(r["starting"]), r["start_date"], money(r["month_in"]), money(r["month_out"]), money(r["purchases"]), r["notes"]),
+        )
+        activity_rows.sort(key=lambda row: (row["date"], str(row["id"])), reverse=True)
+        self.set_table(
+            self.account_activity_table,
+            activity_rows[:80],
+            lambda r: (r["date"], r["account"], r["kind"], r["description"], r["category"], r["amount"]),
         )
 
     def refresh_reconciliation_summary(self, cash_today: float, reconciliations) -> None:
