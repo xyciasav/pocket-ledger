@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.36"
+APP_VERSION = "0.2.37"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -1737,7 +1737,9 @@ class PocketLedgerQt(QMainWindow):
                 events.append((d, "Bill" if amount else "Bill on card", row["name"], amount))
         for row in cards:
             for d in self.dates_between(row["due_day"], start, end):
-                events.append((d, "Card minimum", row["name"], -float(row["minimum_payment"] or 0)))
+                minimum = float(row["minimum_payment"] or 0)
+                if minimum > 0:
+                    events.append((d, "Card minimum", row["name"], -minimum))
         for row in loans:
             for d in self.dates_between(row["due_day"], start, end):
                 events.append((d, "Loan payment", row["name"], -float(row["payment"] or 0)))
