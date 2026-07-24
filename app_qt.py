@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_VERSION = "0.2.31"
+APP_VERSION = "0.2.32"
 DEFAULT_UPDATE_REPO = "xyciasav/pocket-ledger"
 RELEASES_API_URL = f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 RELEASES_PAGE_URL = f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest"
@@ -65,6 +65,7 @@ DB_PATH = APP_DIR / "budget.db"
 
 DEFAULT_LEDGER_NAME = "Personal"
 DEFAULT_CASH_ACCOUNT_NAME = "Main checking"
+CASH_ACCOUNT_TYPES = ("Bills checking", "Spending checking", "Savings", "Other")
 BANK_ACCOUNT = "Bank account"
 BANK_MANUAL = "Bank account / manual"
 BANK_ACH = "Bank ACH / autopay"
@@ -113,7 +114,8 @@ class Store:
                 id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, notes TEXT DEFAULT '');
             CREATE TABLE IF NOT EXISTS cash_accounts (
                 id INTEGER PRIMARY KEY, ledger_id INTEGER NOT NULL DEFAULT 1,
-                name TEXT NOT NULL, starting_balance REAL NOT NULL DEFAULT 0,
+                name TEXT NOT NULL, account_type TEXT NOT NULL DEFAULT 'Bills checking',
+                starting_balance REAL NOT NULL DEFAULT 0,
                 start_date TEXT NOT NULL DEFAULT '', notes TEXT DEFAULT '');
             CREATE TABLE IF NOT EXISTS bills (
                 id INTEGER PRIMARY KEY, name TEXT NOT NULL, due_day INTEGER NOT NULL,
@@ -160,10 +162,12 @@ class Store:
         self.conn.execute("INSERT OR IGNORE INTO ledgers(id,name,notes) VALUES(1,?,?)", (DEFAULT_LEDGER_NAME, "Default ledger"))
         self.ensure_column("bills", "paid_from", f"TEXT NOT NULL DEFAULT '{BANK_MANUAL}'")
         self.ensure_column("bills", "related_card_id", "INTEGER")
+        self.ensure_column("cash_accounts", "account_type", "TEXT NOT NULL DEFAULT 'Bills checking'")
         for table in ("bills", "income", "cards", "loans", "transactions", "cc_spending", "paid_scheduled", "scheduled_overrides", "budget_targets", "reconciliations"):
             self.ensure_column(table, "ledger_id", "INTEGER NOT NULL DEFAULT 1")
         self.ensure_column("transactions", "account_id", "INTEGER")
         self.ensure_column("transactions", "related_card_id", "INTEGER")
+        self.ensure_column("cc_spending", "account_id", "INTEGER")
         self.ensure_column("loans", "extra_payment", "REAL NOT NULL DEFAULT 0")
         self.ensure_column("loans", "original_amount", "REAL NOT NULL DEFAULT 0")
         self.ensure_default_cash_account()
@@ -232,8 +236,8 @@ class Store:
             if self.one("SELECT id FROM cash_accounts WHERE ledger_id=? LIMIT 1", (ledger["id"],)):
                 continue
             self.conn.execute(
-                "INSERT INTO cash_accounts(ledger_id,name,starting_balance,start_date,notes) VALUES(?,?,?,?,?)",
-                (ledger["id"], DEFAULT_CASH_ACCOUNT_NAME, 0, date.today().isoformat(), "Default cashflow account"),
+                "INSERT INTO cash_accounts(ledger_id,name,account_type,starting_balance,start_date,notes) VALUES(?,?,?,?,?,?)",
+                (ledger["id"], DEFAULT_CASH_ACCOUNT_NAME, "Bills checking", 0, date.today().isoformat(), "Default cashflow account"),
             )
 
 
@@ -823,6 +827,9 @@ class PocketLedgerQt(QMainWindow):
         setup_note.setObjectName("cardText")
         setup_note.setWordWrap(True)
         layout.addWidget(self.card_frame("Setup data", setup_note))
+        self.cash_accounts_table = self.table(("Name", "Type", "Starting", "Start date", "Notes"))
+        self.cash_accounts_table.setMinimumHeight(220)
+        layout.addWidget(self.entity_card("Cash accounts", self.cash_accounts_table, self.add_cash_account, self.edit_cash_account, self.delete_cash_account))
         self.budget_targets_table = self.table(("Category", "Monthly limit", "Notes"))
         self.budget_targets_table.setMinimumHeight(220)
         layout.addWidget(self.entity_card("Monthly budget targets", self.budget_targets_table, self.add_budget_target, self.edit_budget_target, self.delete_budget_target))
@@ -951,12 +958,15 @@ class PocketLedgerQt(QMainWindow):
                 "starting_balance": sum(float(row["starting_balance"] or 0) for row in rows),
                 "start_date": latest_start,
             }
-        account = self.store.one("SELECT * FROM cash_accounts WHERE ledger_id=? ORDER BY id LIMIT 1", (self.ledger_id,))
+        account = self.store.one(
+            "SELECT * FROM cash_accounts WHERE ledger_id=? ORDER BY CASE WHEN account_type='Bills checking' THEN 0 ELSE 1 END,id LIMIT 1",
+            (self.ledger_id,),
+        )
         if account:
             return account
         self.store.execute(
-            "INSERT INTO cash_accounts(ledger_id,name,starting_balance,start_date,notes) VALUES(?,?,?,?,?)",
-            (self.ledger_id, DEFAULT_CASH_ACCOUNT_NAME, 0, date.today().isoformat(), "Default cashflow account"),
+            "INSERT INTO cash_accounts(ledger_id,name,account_type,starting_balance,start_date,notes) VALUES(?,?,?,?,?,?)",
+            (self.ledger_id, DEFAULT_CASH_ACCOUNT_NAME, "Bills checking", 0, date.today().isoformat(), "Default cashflow account"),
         )
         return self.store.one("SELECT * FROM cash_accounts WHERE ledger_id=? ORDER BY id LIMIT 1", (self.ledger_id,))
 
@@ -980,8 +990,12 @@ class PocketLedgerQt(QMainWindow):
             )
             spending = self.store.rows(
                 """
-                SELECT s.*, COALESCE(c.name,'Unknown card') card_name
-                FROM cc_spending s LEFT JOIN cards c ON c.id=s.card_id
+                SELECT s.*, COALESCE(c.name,a.name,'Unknown account') account_name,
+                       CASE WHEN c.name IS NOT NULL THEN 'Card' ELSE 'Cash account' END account_kind,
+                       COALESCE(c.name,a.name,'Unknown account') card_name
+                FROM cc_spending s
+                LEFT JOIN cards c ON c.id=s.card_id
+                LEFT JOIN cash_accounts a ON a.id=s.account_id
                 ORDER BY s.ledger_id,s.spend_date DESC,s.id DESC
                 """
             )
@@ -1005,8 +1019,12 @@ class PocketLedgerQt(QMainWindow):
             )
             spending = self.store.rows(
                 """
-                SELECT s.*, COALESCE(c.name,'Unknown card') card_name
-                FROM cc_spending s LEFT JOIN cards c ON c.id=s.card_id
+                SELECT s.*, COALESCE(c.name,a.name,'Unknown account') account_name,
+                       CASE WHEN c.name IS NOT NULL THEN 'Card' ELSE 'Cash account' END account_kind,
+                       COALESCE(c.name,a.name,'Unknown account') card_name
+                FROM cc_spending s
+                LEFT JOIN cards c ON c.id=s.card_id
+                LEFT JOIN cash_accounts a ON a.id=s.account_id
                 WHERE s.ledger_id=?
                 ORDER BY s.spend_date DESC,s.id DESC
                 """,
@@ -1022,13 +1040,16 @@ class PocketLedgerQt(QMainWindow):
         change_start = start_date + timedelta(days=1)
         income_received = self.scheduled_income_between(income, change_start, today)
         due_outflow = self.scheduled_checking_outflow_between(bills, cards, loans, change_start, today)
-        actual_spending = self.transaction_total_between(transactions, change_start, today)
-        extra_income = sum(row["amount"] for row in transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
+        cash_transactions = self.transactions_for_account(transactions, cash["id"])
+        cash_spending = self.spending_for_account(spending, cash["id"])
+        actual_spending = self.transaction_total_between(cash_transactions, change_start, today) + self.cash_spending_total_between(cash_spending, change_start, today)
+        extra_income = sum(row["amount"] for row in cash_transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
         cash_today = float(cash["starting_balance"] or 0) + income_received + extra_income - due_outflow - actual_spending
         card_balances = {card["id"]: float(card["balance"] or 0) for card in cards}
         card_debt = sum(card_balances.values())
         card_room = sum(float(card["credit_limit"] or 0) - card_balances.get(card["id"], 0) for card in cards)
         loan_debt = sum(self.loan_remaining(row) for row in loans)
+        cash_accounts = self.store.rows("SELECT * FROM cash_accounts WHERE ledger_id=? ORDER BY CASE WHEN account_type='Bills checking' THEN 0 WHEN account_type='Spending checking' THEN 1 WHEN account_type='Savings' THEN 2 ELSE 3 END,name", (self.ledger_id,))
 
         for i in reversed(range(self.metric_grid.count())):
             widget = self.metric_grid.itemAt(i).widget()
@@ -1044,11 +1065,14 @@ class PocketLedgerQt(QMainWindow):
         )
         for idx, metric in enumerate(metrics):
             self.metric_grid.addWidget(MetricCard(metric), idx // 3, idx % 3)
+        account_balances = self.cash_account_balances(cash_accounts, bills, income, cards, loans, transactions, spending, today)
+        account_lines = "  ".join(f"{name}: {money(balance)}" for name, balance in account_balances)
         self.account_label.setText(
             f"{cash['name']} baseline: {money(cash['starting_balance'])} as of {cash['start_date']}. "
             "If you reset starting cash today, the since-reset cards can show $0 until income, bills, payments, or Cash Activity rows happen after that date. "
             "Card balances are set on the Debt page; purchase rows are for tracking and insights. "
-            "Loan payments are scheduled checking outflows."
+            "Loan payments are scheduled checking outflows. "
+            f"Account balances: {account_lines or 'No cash accounts yet.'}"
         )
         card_names = {row["id"]: row["name"] for row in cards}
         self.set_table(self.bills_table, bills, lambda r: (r["name"], r["due_day"], r["category"], r["paid_from"], card_names.get(r["related_card_id"], "—"), money(r["amount"])))
@@ -1056,20 +1080,21 @@ class PocketLedgerQt(QMainWindow):
         self.refresh_setup_summary(bills, income, cards, loans, today)
         self.set_table(self.cards_table, cards, lambda r: (r["name"], money(card_balances.get(r["id"], 0)), money(float(r["credit_limit"] or 0)-card_balances.get(r["id"], 0)), money(r["credit_limit"]), f"{r['apr']:.2f}%", money(r["minimum_payment"]), r["due_day"] or "—"))
         self.set_table(self.loans_table, loans, lambda r: (r["name"], r["lender"], money(self.loan_remaining(r)), money(self.loan_original_amount(r)), money(r["extra_payment"]), f"{r['apr']:.2f}%", money(r["payment"]), r["due_day"] or "—"))
+        self.set_table(self.cash_accounts_table, cash_accounts, lambda r: (r["name"], r["account_type"], money(r["starting_balance"]), r["start_date"], r["notes"] or ""))
         self.set_table(self.budget_targets_table, budget_targets, lambda r: (r["category"], money(r["monthly_limit"]), r["notes"] or ""))
         self.refresh_debt_summary(cards, loans)
         self.set_table(self.transactions_table, transactions, lambda r: (r["trans_date"], r["account_name"], r["description"], r["category"], r["related_card_name"] or "—", money(r["amount"])))
-        self.set_table(self.spending_table, spending, lambda r: (r["spend_date"], r["card_name"], r["description"], r["category"], money(r["amount"]), "No"))
+        self.set_table(self.spending_table, spending, lambda r: (r["spend_date"], f"{r['account_kind']}: {r['account_name']}", r["description"], r["category"], money(r["amount"]), "No"))
         self.refresh_cash_activity_summary(transactions)
 
-        future_timeline = self.upcoming_events(bills, income, cards, loans, transactions, cash_today, today + timedelta(days=1), today + timedelta(days=60))
+        future_timeline = self.upcoming_events(bills, income, cards, loans, cash_transactions, cash_spending, cash_today, today + timedelta(days=1), today + timedelta(days=60))
         future_timeline.insert(0, {"id": 0, "date": today.isoformat(), "kind": "Today", "name": "Current cash", "amount": 0, "running": cash_today})
         lookback_start = today - timedelta(days=60)
         historical_events = [
             {"id": -(idx + 2), "date": d.isoformat(), "kind": kind, "name": name, "amount": amount, "running": None}
-            for idx, (d, kind, name, amount) in enumerate(self.cashflow_event_rows(bills, income, cards, loans, transactions, lookback_start, start_date))
+            for idx, (d, kind, name, amount) in enumerate(self.cashflow_event_rows(bills, income, cards, loans, cash_transactions, cash_spending, lookback_start, start_date))
         ]
-        detailed_timeline = historical_events + self.upcoming_events(bills, income, cards, loans, transactions, float(cash["starting_balance"] or 0), change_start, today + timedelta(days=60))
+        detailed_timeline = historical_events + self.upcoming_events(bills, income, cards, loans, cash_transactions, cash_spending, float(cash["starting_balance"] or 0), change_start, today + timedelta(days=60))
         detailed_timeline.insert(0, {"id": 0, "date": start_date.isoformat(), "kind": "Cash reset", "name": f"{cash['name']} reset point", "amount": 0, "running": float(cash["starting_balance"] or 0)})
         detailed_timeline.append({"id": -1, "date": today.isoformat(), "kind": "Today", "name": "Current cash", "amount": 0, "running": cash_today})
         self.set_table(self.cashflow_table, detailed_timeline, lambda r: (r["date"], r["kind"], r["name"], signed_money(r["amount"]), money(r["running"]) if r["running"] is not None else "— before reset"))
@@ -1132,7 +1157,7 @@ class PocketLedgerQt(QMainWindow):
                 amount = float(row["amount"] or 0)
                 month_rows.append(row)
                 by_category[row["category"]] = by_category.get(row["category"], 0) + amount
-                by_account[row["card_name"]] = by_account.get(row["card_name"], 0) + amount
+                by_account[row["account_name"]] = by_account.get(row["account_name"], 0) + amount
         total = sum(by_category.values())
         top_category = max(by_category.items(), key=lambda item: item[1])[0] if by_category else "—"
         top_account = max(by_account.items(), key=lambda item: item[1])[0] if by_account else "—"
@@ -1377,7 +1402,7 @@ class PocketLedgerQt(QMainWindow):
         for row in spending:
             d = self.parse_date(row["spend_date"])
             if start <= d <= end:
-                records.append({"category": row["category"], "description": row["description"], "source": f"Card: {row['card_name']}", "amount": float(row["amount"] or 0)})
+                records.append({"category": row["category"], "description": row["description"], "source": f"{row['account_kind']}: {row['account_name']}", "amount": float(row["amount"] or 0)})
         for bill in bills:
             for _d in self.dates_between(bill["due_day"], start, end):
                 source = "Bill from checking" if is_bank_paid(bill["paid_from"]) else "Bill on card"
@@ -1509,10 +1534,48 @@ class PocketLedgerQt(QMainWindow):
         for row in transactions:
             d = self.parse_date(row["trans_date"])
             if start <= d <= end:
-                total += -float(row["amount"] or 0) if row["category"] == EXTRA_INCOME_CATEGORY else float(row["amount"] or 0)
+                if row["category"] != EXTRA_INCOME_CATEGORY:
+                    total += float(row["amount"] or 0)
         return total
 
-    def cashflow_event_rows(self, bills, income, cards, loans, transactions, start: date, end: date) -> list[tuple[date, str, str, float]]:
+    def cash_spending_total_between(self, spending, start: date, end: date) -> float:
+        total = 0.0
+        for row in spending:
+            d = self.parse_date(row["spend_date"])
+            if start <= d <= end:
+                total += float(row["amount"] or 0)
+        return total
+
+    def transactions_for_account(self, transactions, account_id: int):
+        if self.ledger_id == 0 or not account_id:
+            return transactions
+        return [row for row in transactions if int(row["account_id"] or account_id) == int(account_id)]
+
+    def spending_for_account(self, spending, account_id: int):
+        if self.ledger_id == 0 or not account_id:
+            return [row for row in spending if row["account_id"]]
+        return [row for row in spending if int(row["account_id"] or 0) == int(account_id)]
+
+    def cash_account_balances(self, accounts, bills, income, cards, loans, transactions, spending, today: date) -> list[tuple[str, float]]:
+        balances = []
+        primary = self.cash_account()
+        for account in accounts:
+            start_date = self.parse_date(account["start_date"])
+            change_start = start_date + timedelta(days=1)
+            account_transactions = self.transactions_for_account(transactions, account["id"])
+            account_spending = self.spending_for_account(spending, account["id"])
+            activity_total = self.transaction_total_between(account_transactions, change_start, today)
+            cash_spend_total = self.cash_spending_total_between(account_spending, change_start, today)
+            extra_income = sum(row["amount"] for row in account_transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
+            balance = float(account["starting_balance"] or 0) + extra_income - activity_total - cash_spend_total
+            if int(account["id"]) == int(primary["id"]):
+                income_received = self.scheduled_income_between(income, change_start, today)
+                due_outflow = self.scheduled_checking_outflow_between(bills, cards, loans, change_start, today)
+                balance = float(account["starting_balance"] or 0) + income_received + extra_income - due_outflow - activity_total - cash_spend_total
+            balances.append((f"{account['name']} ({account['account_type']})", balance))
+        return balances
+
+    def cashflow_event_rows(self, bills, income, cards, loans, transactions, spending, start: date, end: date) -> list[tuple[date, str, str, float]]:
         events = []
         for row in income:
             for d in self.dates_between(row["pay_day"], start, end):
@@ -1532,11 +1595,15 @@ class PocketLedgerQt(QMainWindow):
             if start <= d <= end:
                 amount = float(row["amount"] or 0) if row["category"] == EXTRA_INCOME_CATEGORY else -float(row["amount"] or 0)
                 events.append((d, "Extra income" if amount > 0 else "Spending", row["description"], amount))
+        for row in spending:
+            d = self.parse_date(row["spend_date"])
+            if start <= d <= end:
+                events.append((d, "Account spending", row["description"], -float(row["amount"] or 0)))
         events.sort(key=lambda item: (item[0], 0 if item[3] > 0 else 1, item[2]))
         return events
 
-    def upcoming_events(self, bills, income, cards, loans, transactions, start_cash: float, start: date, end: date) -> list[dict]:
-        events = self.cashflow_event_rows(bills, income, cards, loans, transactions, start, end)
+    def upcoming_events(self, bills, income, cards, loans, transactions, spending, start_cash: float, start: date, end: date) -> list[dict]:
+        events = self.cashflow_event_rows(bills, income, cards, loans, transactions, spending, start, end)
         running = start_cash
         rows = []
         for idx, (d, kind, name, amount) in enumerate(events):
@@ -1614,16 +1681,18 @@ class PocketLedgerQt(QMainWindow):
         )
         if not path_text:
             return
-        cash, bills, income, cards, loans, transactions, _spending, _budget_targets, _reconciliations = self.rows()
+        cash, bills, income, cards, loans, transactions, spending, _budget_targets, _reconciliations = self.rows()
         today = date.today()
         start_date = self.parse_date(cash["start_date"])
         change_start = start_date + timedelta(days=1)
+        cash_transactions = self.transactions_for_account(transactions, cash["id"])
+        cash_spending = self.spending_for_account(spending, cash["id"])
         income_received = self.scheduled_income_between(income, change_start, today)
         due_outflow = self.scheduled_checking_outflow_between(bills, cards, loans, change_start, today)
-        actual_spending = self.transaction_total_between(transactions, change_start, today)
-        extra_income = sum(row["amount"] for row in transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
+        actual_spending = self.transaction_total_between(cash_transactions, change_start, today) + self.cash_spending_total_between(cash_spending, change_start, today)
+        extra_income = sum(row["amount"] for row in cash_transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
         cash_today = float(cash["starting_balance"] or 0) + income_received + extra_income - due_outflow - actual_spending
-        timeline = self.upcoming_events(bills, income, cards, loans, transactions, cash_today, today, today + timedelta(days=90))
+        timeline = self.upcoming_events(bills, income, cards, loans, cash_transactions, cash_spending, cash_today, today, today + timedelta(days=90))
         rows = [{"date": row["date"], "type": row["kind"], "name": row["name"], "amount": row["amount"], "running_cash": row["running"]} for row in timeline]
         self.write_csv(Path(path_text), rows)
         self.export_status.setText(f"Exported cashflow CSV to {path_text}")
@@ -1799,9 +1868,9 @@ class PocketLedgerQt(QMainWindow):
             if start <= d <= end:
                 amount = float(row["amount"] or 0)
                 by_category[row["category"]] = by_category.get(row["category"], 0) + amount
-                by_account[row["card_name"]] = by_account.get(row["card_name"], 0) + amount
+                by_account[row["account_name"]] = by_account.get(row["account_name"], 0) + amount
                 by_description[row["description"]] = by_description.get(row["description"], 0) + amount
-                purchases.append({"date": row["spend_date"], "account": row["card_name"], "description": row["description"], "category": row["category"], "amount": amount})
+                purchases.append({"date": row["spend_date"], "account": row["account_name"], "description": row["description"], "category": row["category"], "amount": amount})
         for row in transactions:
             d = self.parse_date(row["trans_date"])
             if start <= d <= end:
@@ -1809,12 +1878,14 @@ class PocketLedgerQt(QMainWindow):
                 checking.append({"date": row["trans_date"], "description": row["description"], "category": row["category"], "amount": amount})
         start_date = self.parse_date(cash["start_date"])
         change_start = start_date + timedelta(days=1)
+        cash_transactions = self.transactions_for_account(transactions, cash["id"])
+        cash_spending = self.spending_for_account(spending, cash["id"])
         income_received = self.scheduled_income_between(income, change_start, today)
         due_outflow = self.scheduled_checking_outflow_between(bills, cards, loans, change_start, today)
-        actual_spending = self.transaction_total_between(transactions, change_start, today)
-        extra_income = sum(row["amount"] for row in transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
+        actual_spending = self.transaction_total_between(cash_transactions, change_start, today) + self.cash_spending_total_between(cash_spending, change_start, today)
+        extra_income = sum(row["amount"] for row in cash_transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
         cash_today = float(cash["starting_balance"] or 0) + income_received + extra_income - due_outflow - actual_spending
-        timeline = self.upcoming_events(bills, income, cards, loans, transactions, cash_today, today + timedelta(days=1), today + timedelta(days=60))
+        timeline = self.upcoming_events(bills, income, cards, loans, cash_transactions, cash_spending, cash_today, today + timedelta(days=1), today + timedelta(days=60))
         room = self.spending_room_periods(bills, income, cards, loans, cash_today, today)
         low_cash = min([cash_today] + [float(row["running"] or 0) for row in timeline]) if timeline else cash_today
         next_income = next((row for row in timeline if float(row["amount"] or 0) > 0), None)
@@ -2093,14 +2164,16 @@ class PocketLedgerQt(QMainWindow):
         self.refresh_all()
 
     def expected_cash_today(self) -> float:
-        cash, bills, income, cards, loans, transactions, _spending, _budget_targets, _reconciliations = self.rows()
+        cash, bills, income, cards, loans, transactions, spending, _budget_targets, _reconciliations = self.rows()
         today = date.today()
         start_date = self.parse_date(cash["start_date"])
         change_start = start_date + timedelta(days=1)
+        cash_transactions = self.transactions_for_account(transactions, cash["id"])
+        cash_spending = self.spending_for_account(spending, cash["id"])
         income_received = self.scheduled_income_between(income, change_start, today)
         due_outflow = self.scheduled_checking_outflow_between(bills, cards, loans, change_start, today)
-        actual_spending = self.transaction_total_between(transactions, change_start, today)
-        extra_income = sum(row["amount"] for row in transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
+        actual_spending = self.transaction_total_between(cash_transactions, change_start, today) + self.cash_spending_total_between(cash_spending, change_start, today)
+        extra_income = sum(row["amount"] for row in cash_transactions if row["category"] == EXTRA_INCOME_CATEGORY and change_start <= self.parse_date(row["trans_date"]) <= today)
         return float(cash["starting_balance"] or 0) + income_received + extra_income - due_outflow - actual_spending
 
     def reconcile_cash(self) -> None:
@@ -2121,6 +2194,34 @@ class PocketLedgerQt(QMainWindow):
             (self.ledger_id, values["check_date"], expected, actual, difference, values["notes"]),
         )
         QMessageBox.information(self, "Reconciliation saved", f"Expected: {money(expected)}\nActual: {money(actual)}\nDifference: {signed_money(difference)}")
+        self.refresh_all()
+
+    def cash_account_choices(self) -> list[str]:
+        return [f"{r['id']} - {r['name']} ({r['account_type']})" for r in self.store.rows("SELECT id,name,account_type FROM cash_accounts WHERE ledger_id=? ORDER BY name", (self.ledger_id,))]
+
+    def add_cash_account(self): self.cash_account_dialog()
+    def edit_cash_account(self):
+        row_id = self.selected_id(self.cash_accounts_table)
+        if row_id: self.cash_account_dialog(self.store.one("SELECT * FROM cash_accounts WHERE id=? AND ledger_id=?", (row_id, self.ledger_id)))
+    def delete_cash_account(self): self.delete_selected("cash_accounts", self.cash_accounts_table)
+    def cash_account_dialog(self, row=None):
+        values = self.simple_dialog(
+            "Cash account",
+            [("name","text",()),("account_type","choice",CASH_ACCOUNT_TYPES),("starting_balance","money",()),("start_date","date",()),("notes","text",())],
+            dict(row) if row else {"name": "New account", "account_type": "Other", "starting_balance": 0, "start_date": date.today().isoformat(), "notes": ""},
+        )
+        if not values:
+            return
+        if row:
+            self.store.execute(
+                "UPDATE cash_accounts SET name=?,account_type=?,starting_balance=?,start_date=?,notes=? WHERE id=? AND ledger_id=?",
+                (values["name"], values["account_type"], values["starting_balance"], values["start_date"], values["notes"], row["id"], self.ledger_id),
+            )
+        else:
+            self.store.execute(
+                "INSERT INTO cash_accounts(ledger_id,name,account_type,starting_balance,start_date,notes) VALUES(?,?,?,?,?,?)",
+                (self.ledger_id, values["name"], values["account_type"], values["starting_balance"], values["start_date"], values["notes"]),
+            )
         self.refresh_all()
 
     def add_bill(self): self.bill_dialog()
@@ -2220,19 +2321,27 @@ class PocketLedgerQt(QMainWindow):
     def transaction_dialog(self, row=None):
         cash = self.cash_account()
         existing = bool(row and "id" in row.keys()) if hasattr(row, "keys") else False
+        account_choices = self.cash_account_choices()
         card_choices = [""] + [f"{r['id']} - {r['name']}" for r in self.store.rows("SELECT id,name FROM cards WHERE ledger_id=? ORDER BY name", (self.ledger_id,))]
         initial = dict(row) if row else {"trans_date": date.today().isoformat(), "category": "Other"}
+        if initial.get("account_id"):
+            acct = self.store.one("SELECT name,account_type FROM cash_accounts WHERE id=?", (initial["account_id"],))
+            if acct:
+                initial["Account"] = f"{initial['account_id']} - {acct['name']} ({acct['account_type']})"
+        elif account_choices:
+            initial["Account"] = account_choices[0]
         if initial.get("category") == "Credit Card Payment" and initial.get("related_card_id"):
             card = self.store.one("SELECT name FROM cards WHERE id=?", (initial["related_card_id"],))
             initial["Credit card paid"] = f"{initial['related_card_id']} - {card['name'] if card else 'Unknown'}"
         elif initial.get("category") == "Credit Card Payment" and len(card_choices) > 1:
             initial["Credit card paid"] = card_choices[1]
-        values = self.simple_dialog("Checking cash activity", [("trans_date","date",()),("description","text",()),("amount","money",()),("category","choice",SPENDING_CATEGORIES),("Credit card paid","choice",card_choices)], initial)
+        values = self.simple_dialog("Checking cash activity", [("trans_date","date",()),("Account","choice",account_choices),("description","text",()),("amount","money",()),("category","choice",SPENDING_CATEGORIES),("Credit card paid","choice",card_choices)], initial)
         if not values: return
+        account_id = int(values["Account"].split(" - ", 1)[0]) if values.get("Account") else cash["id"]
         related = int(values["Credit card paid"].split(" - ", 1)[0]) if values["Credit card paid"] else None
         if values["category"] != "Credit Card Payment": related = None
-        if existing: self.store.execute("UPDATE transactions SET trans_date=?,description=?,amount=?,category=?,related_card_id=? WHERE id=? AND ledger_id=?", (values["trans_date"], values["description"], values["amount"], values["category"], related, row["id"], self.ledger_id))
-        else: self.store.execute("INSERT INTO transactions(trans_date,description,amount,category,related_card_id,source,account_id,ledger_id) VALUES(?,?,?,?,?,?,?,?)", (values["trans_date"], values["description"], values["amount"], values["category"], related, "Manual", cash["id"], self.ledger_id))
+        if existing: self.store.execute("UPDATE transactions SET trans_date=?,account_id=?,description=?,amount=?,category=?,related_card_id=? WHERE id=? AND ledger_id=?", (values["trans_date"], account_id, values["description"], values["amount"], values["category"], related, row["id"], self.ledger_id))
+        else: self.store.execute("INSERT INTO transactions(trans_date,description,amount,category,related_card_id,source,account_id,ledger_id) VALUES(?,?,?,?,?,?,?,?)", (values["trans_date"], values["description"], values["amount"], values["category"], related, "Manual", account_id, self.ledger_id))
         self.refresh_all()
 
     def add_spending(self): self.spending_dialog()
@@ -2241,21 +2350,28 @@ class PocketLedgerQt(QMainWindow):
         if row_id: self.spending_dialog(self.store.one("SELECT * FROM cc_spending WHERE id=? AND ledger_id=?", (row_id, self.ledger_id)))
     def delete_spending(self): self.delete_selected("cc_spending", self.spending_table)
     def spending_dialog(self, row=None):
-        card_choices = [f"{r['id']} - {r['name']}" for r in self.store.rows("SELECT id,name FROM cards WHERE ledger_id=? ORDER BY name", (self.ledger_id,))]
-        if not card_choices:
-            QMessageBox.information(self, "Add a card first", "Add a credit card on the Debt page first.")
+        card_choices = [f"Card: {r['id']} - {r['name']}" for r in self.store.rows("SELECT id,name FROM cards WHERE ledger_id=? ORDER BY name", (self.ledger_id,))]
+        cash_choices = [f"Account: {r['id']} - {r['name']} ({r['account_type']})" for r in self.store.rows("SELECT id,name,account_type FROM cash_accounts WHERE ledger_id=? ORDER BY name", (self.ledger_id,))]
+        account_choices = card_choices + cash_choices
+        if not account_choices:
+            QMessageBox.information(self, "Add an account first", "Add a credit card or cash account first.")
             return
         initial = dict(row) if row else {"spend_date": date.today().isoformat(), "category": "Other"}
-        if row:
+        if row and row["card_id"]:
             card = self.store.one("SELECT name FROM cards WHERE id=?", (row["card_id"],))
-            initial["Card"] = f"{row['card_id']} - {card['name'] if card else 'Unknown'}"
+            initial["Account"] = f"Card: {row['card_id']} - {card['name'] if card else 'Unknown'}"
+        elif row and row["account_id"]:
+            acct = self.store.one("SELECT name,account_type FROM cash_accounts WHERE id=?", (row["account_id"],))
+            initial["Account"] = f"Account: {row['account_id']} - {acct['name'] if acct else 'Unknown'} ({acct['account_type'] if acct else 'Other'})"
         else:
-            initial["Card"] = card_choices[0]
-        values = self.simple_dialog("Purchase", [("spend_date","date",()),("Card","choice",card_choices),("description","text",()),("amount","money",()),("category","choice",SPENDING_CATEGORIES),("notes","text",())], initial)
+            initial["Account"] = account_choices[0]
+        values = self.simple_dialog("Purchase", [("spend_date","date",()),("Account","choice",account_choices),("description","text",()),("amount","money",()),("category","choice",SPENDING_CATEGORIES),("notes","text",())], initial)
         if not values: return
-        card_id = int(values["Card"].split(" - ", 1)[0])
-        if row: self.store.execute("UPDATE cc_spending SET spend_date=?,card_id=?,description=?,amount=?,category=?,notes=? WHERE id=? AND ledger_id=?", (values["spend_date"], card_id, values["description"], values["amount"], values["category"], values["notes"], row["id"], self.ledger_id))
-        else: self.store.execute("INSERT INTO cc_spending(spend_date,card_id,description,amount,category,notes,ledger_id) VALUES(?,?,?,?,?,?,?)", (values["spend_date"], card_id, values["description"], values["amount"], values["category"], values["notes"], self.ledger_id))
+        account_choice = values["Account"]
+        card_id = int(account_choice.split(": ", 1)[1].split(" - ", 1)[0]) if account_choice.startswith("Card:") else None
+        account_id = int(account_choice.split(": ", 1)[1].split(" - ", 1)[0]) if account_choice.startswith("Account:") else None
+        if row: self.store.execute("UPDATE cc_spending SET spend_date=?,card_id=?,account_id=?,description=?,amount=?,category=?,notes=? WHERE id=? AND ledger_id=?", (values["spend_date"], card_id, account_id, values["description"], values["amount"], values["category"], values["notes"], row["id"], self.ledger_id))
+        else: self.store.execute("INSERT INTO cc_spending(spend_date,card_id,account_id,description,amount,category,notes,ledger_id) VALUES(?,?,?,?,?,?,?,?)", (values["spend_date"], card_id, account_id, values["description"], values["amount"], values["category"], values["notes"], self.ledger_id))
         self.refresh_all()
 
     def delete_selected(self, table: str, widget: QTableWidget) -> None:
